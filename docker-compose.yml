@@ -1,0 +1,68 @@
+# docker-compose.yml
+version: '3.8'
+
+services:
+  cert-generator:
+    build: ./cert-generator
+    container_name: local_cert_generator
+    volumes:
+      # Mounts the local ./certs directory to /certs_output inside the container
+      # The generate_certs.sh script will copy the generated certs here.
+      - ./certs:/certs_output # Output directory for generated certs
+    # environment:
+      # - FORCE_REGENERATE=true # Uncomment to force regeneration
+
+  nginx-mtls-proxy:
+    image: nginx:alpine
+    container_name: local_mtls_proxy
+    ports:
+      - "8443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro # Nginx uses certs from here
+    networks:
+      - mtls-test-net
+    depends_on:
+      - litellm-proxy
+
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: local_litellm_proxy
+    expose:
+      - "4000"
+    volumes:
+      - ./litellm_proxy/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    networks:
+      - mtls-test-net
+    depends_on:
+      - ollama # LiteLLM waits for Ollama
+
+  ollama:
+    build: ./ollama # Build from the custom Ollama Dockerfile
+    container_name: local_ollama
+    expose:
+      - "11434"
+    networks:
+      - mtls-test-net
+    environment:
+      - OLLAMA_PULL_MODEL=qwen3:0.6b # Specify model here, used by entrypoint.sh
+    # No volume needed for models if pulled at startup like this.
+    # If you want to cache models between 'docker-compose down' and 'up',
+    # you can re-add a volume like:
+    # volumes:
+    #   - ollama_models_cache:/root/.ollama
+    # deploy: # Optional GPU support
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+networks:
+  mtls-test-net:
+    driver: bridge
+
+# volumes: # Only needed if you want to cache Ollama models across 'down' and 'up'
+#   ollama_models_cache:
