@@ -1,2 +1,5 @@
 .idea
 certs/*
+.idea-old
+.venv-old
+**/__pycache__/

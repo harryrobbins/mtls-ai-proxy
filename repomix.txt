@@ -1,3 +1,361 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+4. Repository files, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: .jj, .venv
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+<additional_info>
+
+</additional_info>
+
+</file_summary>
+
+<directory_structure>
+.gitignore
+cert-generator/Dockerfile
+cert-generator/generate_certs.sh
+docker-compose.yml
+litellm_proxy/config.yaml
+nginx/nginx.conf
+ollama/Dockerfile
+ollama/entrypoint.sh
+README.md
+repomix.sh
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path=".gitignore">
+.idea
+certs/*
+</file>
+
+<file path="cert-generator/Dockerfile">
+FROM alpine:latest
+
+# Add openssl
+RUN apk add --no-cache openssl
+
+WORKDIR /certs
+COPY generate_certs.sh .
+RUN chmod +x generate_certs.sh
+CMD ["./generate_certs.sh"]
+</file>
+
+<file path="cert-generator/generate_certs.sh">
+#!/bin/sh
+set -e
+
+# Check if certificates already exist to avoid overwriting unless forced
+if [ -f "/certs_output/ca.crt" ] && [ "$FORCE_REGENERATE" != "true" ]; then
+  echo "Certificates already exist in /certs_output. Skipping generation."
+  echo "Set FORCE_REGENERATE=true to overwrite."
+  exit 0
+fi
+
+echo "Generating new certificates..."
+
+# 1. Generate CA private key
+openssl genrsa -out ca.key 2048
+
+# 2. Generate CA certificate (self-signed)
+openssl req -x509 -new -nodes -key ca.key -sha256 -days 3650 -out ca.crt \
+  -subj "/C=XX/ST=Testland/L=TestCity/O=LocalTestOrg/OU=DevOps/CN=LocalTestCA"
+
+# 3. Generate Server private key
+openssl genrsa -out server.key 2048
+
+# 4. Generate Server Certificate Signing Request (CSR)
+openssl req -new -key server.key -out server.csr \
+  -subj "/C=XX/ST=Testland/L=TestCity/O=LocalTestOrg/OU=Server/CN=localhost"
+
+# 5. Sign the Server CSR with the CA
+openssl x509 -req -in server.csr -CA ca.crt -CAkey ca.key \
+  -CAcreateserial -out server.crt -days 3600 -sha256
+
+# 6. Generate Client private key
+openssl genrsa -out client.key 2048
+
+# 7. Generate Client Certificate Signing Request (CSR)
+openssl req -new -key client.key -out client.csr \
+  -subj "/C=XX/ST=Testland/L=TestCity/O=LocalTestOrg/OU=Client/CN=TestClient"
+
+# 8. Sign the Client CSR with the CA
+openssl x509 -req -in client.csr -CA ca.crt -CAkey ca.key \
+  -CAcreateserial -out client.crt -days 3600 -sha256
+
+# Clean up CSR files and serial files
+rm *.csr
+rm *.srl
+
+echo "Certificates generated successfully in the current directory (/certs)."
+echo "They will be copied to the ./certs directory on your host if volume is mounted."
+
+# If output directory is specified and mounted, copy there
+if [ -d "/certs_output" ]; then
+  echo "Copying certificates to /certs_output..."
+  cp ca.crt ca.key client.crt client.key server.crt server.key /certs_output/
+  echo "Certificates copied."
+else
+  echo "Warning: /certs_output directory not found. Certificates remain in the container's /certs directory."
+fi
+</file>
+
+<file path="docker-compose.yml">
+# docker-compose.yml
+version: '3.8'
+
+services:
+  cert-generator:
+    build: ./cert-generator
+    container_name: local_cert_generator
+    volumes:
+      # Mounts the local ./certs directory to /certs_output inside the container
+      # The generate_certs.sh script will copy the generated certs here.
+      - ./certs:/certs_output # Output directory for generated certs
+    # environment:
+      # - FORCE_REGENERATE=true # Uncomment to force regeneration
+
+  nginx-mtls-proxy:
+    image: nginx:alpine
+    container_name: local_mtls_proxy
+    ports:
+      - "8443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro # Nginx uses certs from here
+    networks:
+      - mtls-test-net
+    depends_on:
+      - litellm-proxy
+
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:main-latest
+    container_name: local_litellm_proxy
+    expose:
+      - "4000"
+    volumes:
+      - ./litellm_proxy/config.yaml:/app/config.yaml:ro
+    command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    networks:
+      - mtls-test-net
+    depends_on:
+      - ollama # LiteLLM waits for Ollama
+
+  ollama:
+    build: ./ollama # Build from the custom Ollama Dockerfile
+    container_name: local_ollama
+    expose:
+      - "11434"
+    networks:
+      - mtls-test-net
+    environment:
+      - OLLAMA_PULL_MODEL=qwen3:0.6b # Specify model here, used by entrypoint.sh
+      # Set OLLAMA_MODELS to the path where models will be stored inside the container.
+      # This should match the volume mount path.
+      - OLLAMA_MODELS=/root/.ollama/models
+    volumes:
+      # Mount the named volume 'ollama_models_cache' to /root/.ollama inside the container.
+      # This directory is where Ollama stores its models by default.
+      - ollama_models_cache:/root/.ollama
+    # deploy: # Optional GPU support
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+networks:
+  mtls-test-net:
+    driver: bridge
+
+# Define the named volume for caching Ollama models
+volumes:
+  ollama_models_cache:
+    driver: local # Specifies the local driver, which is the default
+</file>
+
+<file path="litellm_proxy/config.yaml">
+# litellm_proxy/config.yaml
+model_list:
+  - model_name: ollama-qwen-local # Name for accessing this model via the proxy
+    litellm_params:
+      model: ollama/qwen3:0.6b # Tells LiteLLM to use Ollama provider + specific model tag
+      api_base: http://ollama:11434 # Internal docker network address for Ollama service
+      # No api_key needed for local Ollama
+
+litellm_settings:
+ general_settings:
+   master_key: sk-1234 # Master key for LiteLLM proxy auth (not for Ollama)
+</file>
+
+<file path="nginx/nginx.conf">
+# nginx/nginx.conf
+worker_processes 1;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream backend {
+        # 'litellm-proxy' is the service name in docker-compose.yml
+        # Port 4000 is the default LiteLLM proxy port
+        server litellm-proxy:4000;
+    }
+
+    server {
+        listen 443 ssl;
+        server_name localhost; # Match the CN used in server cert
+
+        # --- SSL/TLS Server Config ---
+        ssl_certificate /etc/nginx/certs/server.crt;
+        ssl_certificate_key /etc/nginx/certs/server.key;
+
+        # --- mTLS Client Verification ---
+        ssl_client_certificate /etc/nginx/certs/ca.crt; # CA cert to verify client certs
+        ssl_verify_client on;                          # Require client cert
+        ssl_verify_depth 1;                            # Adjust if using intermediate CAs
+
+        # Optional: Send client cert info to backend (if needed)
+        # proxy_set_header X-SSL-Client-Cert $ssl_client_escaped_cert;
+        # proxy_set_header X-SSL-Client-Verify $ssl_client_verify;
+        # proxy_set_header X-SSL-Client-Subject $ssl_client_s_dn;
+
+        location / {
+            proxy_pass http://backend; # Forward to the upstream backend service
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            # WebSocket support for streaming if LiteLLM uses it
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_read_timeout 86400; # Long timeout for streaming
+            proxy_buffering off;      # Disable buffering for SSE/WebSockets
+        }
+    }
+}
+</file>
+
+<file path="ollama/Dockerfile">
+FROM ollama/ollama
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+</file>
+
+<file path="ollama/entrypoint.sh">
+#!/bin/sh
+set -e # Exit immediately if a command exits with a non-zero status.
+
+LOG_FILE="/tmp/ollama_serve.log"
+
+echo "Ollama entrypoint script started."
+echo "Logging ollama serve output to $LOG_FILE"
+
+# Start ollama serve in the background, redirecting its stdout and stderr
+ollama serve > "$LOG_FILE" 2>&1 &
+pid=$! # Get the process ID of ollama serve
+
+# Function to print last few lines of log and kill ollama
+fail_and_exit() {
+  echo "Ollama failed. Last lines from $LOG_FILE:"
+  tail -n 30 "$LOG_FILE" # Print last 30 lines for debugging
+  kill $pid >/dev/null 2>&1 || true # Try to kill the background ollama serve process
+  echo "Exiting."
+  exit 1
+}
+
+# Wait for Ollama server to be responsive using "ollama ps"
+echo "Waiting for Ollama server to become responsive..."
+count=0
+max_count=60 # Wait for max 60 seconds
+until ollama ps >/dev/null 2>&1; do
+  # Check if the background process is still alive
+  if ! ps -p $pid > /dev/null; then
+    echo "Ollama serve process (PID: $pid) died unexpectedly."
+    fail_and_exit
+  fi
+  sleep 1
+  count=$((count+1))
+  if [ "$count" -ge "$max_count" ]; then
+    echo "Ollama server failed to become responsive (ollama ps) within $max_count seconds."
+    fail_and_exit
+  fi
+  printf "."
+done
+echo "" # Newline after dots
+echo "Ollama server is responsive."
+echo "--- Current content of $LOG_FILE (first 20 lines): ---"
+head -n 20 "$LOG_FILE"
+echo "-------------------------------------------------------"
+
+
+# Pull the specified model
+MODEL_TO_PULL=${OLLAMA_PULL_MODEL:-qwen3:0.6b}
+echo "Pulling model: $MODEL_TO_PULL ..."
+if ! ollama pull "$MODEL_TO_PULL"; then
+    echo "Failed to pull model $MODEL_TO_PULL."
+    echo "--- Content of $LOG_FILE on pull failure: ---"
+    cat "$LOG_FILE"
+    echo "----------------------------------------------"
+    kill $pid >/dev/null 2>&1 || true
+    exit 1
+fi
+echo "Model $MODEL_TO_PULL pulled successfully or already exists."
+
+echo "Ollama is running with model $MODEL_TO_PULL. PID: $pid"
+wait $pid
+
+echo "Ollama serve process (PID: $pid) has exited."
+echo "--- Final content of $LOG_FILE: ---"
+cat "$LOG_FILE"
+echo "----------------------------------"
+exit 0
+</file>
+
+<file path="README.md">
 # Local mTLS Testing Environment for LLM Services
 
 This setup uses Docker Compose to create a local environment with:
@@ -231,3 +589,10 @@ In app/core/custom_llm_providers.py (your main application, not the test setup):
 ```
 
 This refinement to _create_ssl_context in your actual application's custom provider will be important when testing against the local Nginx server that uses a certificate signed by your custom ca.crt. You'd also need to ensure ca.crt is available to your main application (e.g., copy it from local-mtls-test/certs/ to a location your app can access).
+</file>
+
+<file path="repomix.sh">
+repomix -o repomix.txt -i .jj,.venv
+</file>
+
+</files>

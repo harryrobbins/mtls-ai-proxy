@@ -43,15 +43,19 @@ services:
     container_name: local_ollama
     expose:
       - "11434"
+    ports:
+      - "11434:11434"
     networks:
       - mtls-test-net
     environment:
       - OLLAMA_PULL_MODEL=qwen3:0.6b # Specify model here, used by entrypoint.sh
-    # No volume needed for models if pulled at startup like this.
-    # If you want to cache models between 'docker-compose down' and 'up',
-    # you can re-add a volume like:
-    # volumes:
-    #   - ollama_models_cache:/root/.ollama
+      # Set OLLAMA_MODELS to the path where models will be stored inside the container.
+      # This should match the volume mount path.
+      - OLLAMA_MODELS=/root/.ollama/models
+    volumes:
+      # Mount the named volume 'ollama_models_cache' to /root/.ollama inside the container.
+      # This directory is where Ollama stores its models by default.
+      - ollama_models_cache:/root/.ollama
     # deploy: # Optional GPU support
     #   resources:
     #     reservations:
@@ -64,5 +68,7 @@ networks:
   mtls-test-net:
     driver: bridge
 
-# volumes: # Only needed if you want to cache Ollama models across 'down' and 'up'
-#   ollama_models_cache:
+# Define the named volume for caching Ollama models
+volumes:
+  ollama_models_cache:
+    driver: local # Specifies the local driver, which is the default
