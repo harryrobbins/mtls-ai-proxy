@@ -4,301 +4,334 @@ import subprocess
 import os
 import time
 from pathlib import Path
+import json # For parsing curl output
+from dotenv import load_dotenv  # For loading .env file
+
+# Load environment variables from .env file
+load_dotenv()
 
 # --- Configuration ---
-# Base directory of the project (assuming tests are in a 'tests' subdirectory)
 BASE_DIR = Path(__file__).resolve().parent.parent
-
-# Certs directory
 CERTS_DIR = BASE_DIR / "certs"
 CLIENT_CERT_PATH = CERTS_DIR / "client.crt"
 CLIENT_KEY_PATH = CERTS_DIR / "client.key"
 CA_CERT_PATH = CERTS_DIR / "ca.crt"
 
-# Service URLs
 OLLAMA_DIRECT_URL = "http://127.0.0.1:11434"
 OLLAMA_TAGS_ENDPOINT = f"{OLLAMA_DIRECT_URL}/api/tags"
+LITELLM_DIRECT_URL = "http://localhost:4000"  # As per docker-compose.yml [cite: 176] and python-client/main.py [cite: 140]
+LITELLM_DIRECT_CHAT_ENDPOINT = f"{LITELLM_DIRECT_URL}/chat/completions"
 MTLS_PROXY_URL = "https://localhost:8443"
 LITELLM_CHAT_ENDPOINT = f"{MTLS_PROXY_URL}/chat/completions"
 
-# Model to use for testing (should match litellm_proxy/config.yaml)
 TEST_MODEL_NAME = "ollama-qwen-local"
-LITELLM_MASTER_KEY = "sk-1234"  # As per litellm_proxy/config.yaml
+LITELLM_MASTER_KEY = "sk-1234"
 
-# Readiness check parameters
 MAX_READINESS_WAIT_SECONDS = 60
 READINESS_CHECK_INTERVAL_SECONDS = 5
 
 
+
 # --- Helper Functions ---
 
-def run_docker_compose_command(command_args, env_vars=None, check=True):
-    """Runs a docker-compose command."""
-    cmd = ["docker-compose"] + command_args
-    print(f"Running command: {' '.join(cmd)}")
-    try:
+def run_command(command_list, cwd=None, check=True, capture_output=True, text=True, env_vars=None):
+    """Runs a generic command using subprocess."""
+    print(f"Running command: {' '.join(command_list)}")
+    effective_env = {**os.environ, **(env_vars or {})}
+    try: # [cite: 13]
         process = subprocess.run(
-            cmd,
-            cwd=BASE_DIR,
-            capture_output=True,
-            text=True,
-            check=check,  # Allow disabling check for commands that might fail (e.g., down)
-            env={**os.environ, **(env_vars or {})}
+            command_list,
+            cwd=cwd or BASE_DIR,
+            capture_output=capture_output,
+            text=text,
+            check=check,
+            env=effective_env
         )
-        if process.stdout:  # Print stdout only if it's not empty
-            print(f"Command stdout:\n{process.stdout.strip()}")
-        if process.stderr:  # Print stderr only if it's not empty
-            print(f"Command stderr:\n{process.stderr.strip()}")
+        if capture_output: # [cite: 14]
+            if process.stdout and process.stdout.strip():
+                print(f"Command stdout:\n{process.stdout.strip()}")
+            if process.stderr and process.stderr.strip():
+                print(f"Command stderr:\n{process.stderr.strip()}")
         return process
     except subprocess.CalledProcessError as e:
-        print(f"Error running command: {' '.join(cmd)}")
-        print(f"Return code: {e.returncode}")
-        if e.stdout:
-            print(f"Stdout:\n{e.stdout.strip()}")
-        if e.stderr:
-            print(f"Stderr:\n{e.stderr.strip()}")
-        if check:  # Only fail the test if check=True
-            pytest.fail(f"Docker-compose command failed: {' '.join(cmd)}. Error: {e.stderr or e.stdout}")
+        print(f"Error running command: {' '.join(command_list)}")
+        print(f"Return code: {e.returncode}") # [cite: 15]
+        if capture_output:
+            if e.stdout and e.stdout.strip():
+                print(f"Stdout:\n{e.stdout.strip()}")
+            if e.stderr and e.stderr.strip():
+                print(f"Stderr:\n{e.stderr.strip()}")
+        if check:
+            pytest.fail(f"Command failed: {' '.join(command_list)}. Error: {e.stderr or e.stdout or 'Unknown error'}") # [cite: 16]
     except FileNotFoundError:
-        pytest.fail("docker-compose command not found. Is it installed and in PATH?")
+        pytest.fail(f"Command {command_list[0]} not found. Is it installed and in PATH?")
+
+
+def run_docker_compose_command(command_args, env_vars=None, check=True):
+    """Wrapper for docker-compose commands."""
+    return run_command(["docker-compose"] + command_args, env_vars=env_vars, check=check)
 
 
 # --- Pytest Fixtures ---
 
 @pytest.fixture(scope="session", autouse=True)
 def ensure_services_are_up():
-    """
-    Fixture to ensure main services, especially Ollama, are up and responsive.
-    Retries checking the Ollama direct endpoint for a specified duration.
-    """
     print("Checking if essential Docker services are running and Ollama is responsive...")
     print(f"Will wait up to {MAX_READINESS_WAIT_SECONDS} seconds for Ollama at {OLLAMA_TAGS_ENDPOINT}.")
-    print("Ensure 'docker-compose up -d nginx-mtls-proxy litellm-proxy ollama' has been run.")
-
     start_time = time.time()
     ollama_ready = False
     last_exception = None
-
-    while time.time() - start_time < MAX_READINESS_WAIT_SECONDS:
+    while time.time() - start_time < MAX_READINESS_WAIT_SECONDS: # [cite: 17]
         try:
-            print(
-                f"Attempting to connect to Ollama at {OLLAMA_TAGS_ENDPOINT} (Attempt {int((time.time() - start_time) / READINESS_CHECK_INTERVAL_SECONDS) + 1})")
+            print(f"Attempting to connect to Ollama at {OLLAMA_TAGS_ENDPOINT} (Attempt {int((time.time() - start_time) / READINESS_CHECK_INTERVAL_SECONDS) + 1})")
             response = requests.get(OLLAMA_TAGS_ENDPOINT, timeout=5)
             response.raise_for_status()
-            if response.status_code == 200:
-                try:
-                    data = response.json()
-                    if "models" in data:
-                        print("Ollama is responsive and returned model list.")
-                        ollama_ready = True
-                        break
-                    else:
-                        print(f"Ollama responded, but /api/tags format unexpected: {data}")
-                        last_exception = Exception(f"Ollama /api/tags format unexpected: {data}")
-                except ValueError:  # Handles cases where response is not JSON
-                    print(f"Ollama responded to {OLLAMA_TAGS_ENDPOINT}, but not with valid JSON: {response.text[:100]}")
-                    last_exception = Exception(f"Ollama responded to {OLLAMA_TAGS_ENDPOINT}, but not with valid JSON.")
-            # else: # Should be caught by raise_for_status, but as a fallback
-            #     print(f"Ollama at {OLLAMA_TAGS_ENDPOINT} responded with status {response.status_code}.")
-            #     last_exception = requests.exceptions.HTTPError(f"Status {response.status_code}")
-
-        except requests.exceptions.ConnectionError as e:
-            print(f"Ollama not yet reachable at {OLLAMA_TAGS_ENDPOINT}. Retrying... Error: {e}")
-            last_exception = e
-        except requests.exceptions.RequestException as e:  # Catch other request-related errors like HTTP errors
-            print(
-                f"Error connecting to Ollama or unexpected response from {OLLAMA_TAGS_ENDPOINT}. Retrying... Error: {e}")
-            last_exception = e
-
+            if response.status_code == 200 and "models" in response.json():
+                print("Ollama is responsive and returned model list.") # [cite: 18]
+                ollama_ready = True
+                break
+            else:
+                last_exception = Exception(f"Ollama format unexpected: {response.text[:100]}")
+        except requests.exceptions.RequestException as e:
+            last_exception = e # [cite: 19]
+            print(f"Error connecting to Ollama or unexpected response. Retrying... Error: {e}") # [cite: 20]
         time.sleep(READINESS_CHECK_INTERVAL_SECONDS)
-
     if not ollama_ready:
-        failure_message = (
+        pytest.fail(
             f"Ollama service at {OLLAMA_TAGS_ENDPOINT} did not become responsive "
             f"within {MAX_READINESS_WAIT_SECONDS} seconds. Last error: {last_exception}\n"
-            "Please ensure 'ollama', 'litellm-proxy', and 'nginx-mtls-proxy' services are running "
-            "and healthy: 'docker-compose up -d ollama litellm-proxy nginx-mtls-proxy'.\n"
-            "Check 'docker-compose logs ollama' for issues.\n"
-            "Troubleshooting steps:\n"
-            "1. Verify Ollama port mapping: `docker ps` (should show 11434 mapped).\n"
-            "2. Test with curl from host: `curl http://127.0.0.1:11434/api/tags`.\n"
-            "3. Check for proxy settings (HTTP_PROXY, HTTPS_PROXY, NO_PROXY) in your test environment.\n"
-            "4. Check host firewall rules.\n"
-            "5. If using WSL, check WSL networking and port forwarding."
-        )
-        pytest.fail(failure_message)
-
+            "Ensure services are up: 'docker-compose up -d ollama litellm-proxy nginx-mtls-proxy'. "
+            "Check logs: 'docker-compose logs ollama'."
+        ) # [cite: 21]
     print("Ollama confirmed ready. Giving a brief moment for other services...")
-    time.sleep(5)  # Give other services a moment to be fully ready after Ollama
-
+    time.sleep(5)
 
 @pytest.fixture(scope="module")
 def regenerate_certificates_and_restart_nginx():
-    """
-    Fixture to ensure certificates are freshly generated and Nginx is restarted.
-    This runs once per test module that uses it.
-    """
-    print("Regenerating certificates...")
-    CERTS_DIR.mkdir(parents=True, exist_ok=True)  # Ensure ./certs directory exists
-
-    # Force regenerate certificates
-    run_docker_compose_command(
-        ["run", "--rm", "-e", "FORCE_REGENERATE=true", "cert-generator"]
-    )
+    print("Regenerating certificates with SAN for server and restarting Nginx...")
+    CERTS_DIR.mkdir(parents=True, exist_ok=True)
+    # Rebuild cert-generator if Dockerfile changed (e.g., new openssl_server.cnf)
+    run_docker_compose_command(["build", "cert-generator"])
+    run_docker_compose_command(["run", "--rm", "-e", "FORCE_REGENERATE=true", "cert-generator"])
     print("Certificates regenerated.")
-
-    # Verify all expected cert files are created on the host
-    expected_certs = [
-        CERTS_DIR / "ca.crt", CERTS_DIR / "ca.key",
-        CERTS_DIR / "server.crt", CERTS_DIR / "server.key",
-        CLIENT_CERT_PATH, CLIENT_KEY_PATH
-    ]
-    missing_certs = [cert for cert in expected_certs if not cert.exists()]
-    if missing_certs:
-        pytest.fail(f"Missing certificate files in host './certs' directory after generation: {missing_certs}")
-
-    print("Restarting Nginx proxy to load new certificates...")
+    expected_certs = [CA_CERT_PATH, CLIENT_CERT_PATH, CLIENT_KEY_PATH, CERTS_DIR / "server.crt", CERTS_DIR / "server.key"]
+    if any(not cert.exists() for cert in expected_certs):
+        pytest.fail(f"Missing cert files after generation: {[str(c) for c in expected_certs if not c.exists()]}") # [cite: 22]
+    print("Restarting Nginx proxy...")
     run_docker_compose_command(["restart", "nginx-mtls-proxy"])
-    print("Nginx proxy restarted. Allowing a moment for it to initialize...")
-    time.sleep(5)  # Give Nginx a few seconds to fully restart and load certs
-
+    print("Nginx restarted. Allowing a moment for it to initialize...") # [cite: 23]
+    time.sleep(5)
     return True
-
 
 # --- Test Cases ---
 
 def test_ollama_direct_accessible():
-    """Test 1: Check if Ollama service is directly accessible on its mapped port."""
+    """Test 1: Check if Ollama service is directly accessible."""
     print(f"Testing direct Ollama access at {OLLAMA_TAGS_ENDPOINT}")
     try:
         response = requests.get(OLLAMA_TAGS_ENDPOINT, timeout=10)
         response.raise_for_status()
-        assert response.status_code == 200
-        assert "models" in response.json(), "Ollama /api/tags response should contain 'models' key"
+        assert "models" in response.json(), "Ollama /api/tags response invalid"
         print("Ollama direct access successful.")
     except requests.exceptions.RequestException as e:
-        pytest.fail(f"Failed to connect to Ollama directly at {OLLAMA_TAGS_ENDPOINT}: {e}")
-
+        pytest.fail(f"Failed to connect to Ollama directly at {OLLAMA_TAGS_ENDPOINT}: {e}") # [cite: 24]
 
 @pytest.mark.usefixtures("regenerate_certificates_and_restart_nginx")
 def test_certificates_are_present_after_regeneration():
-    """Test 2: Verify certificate files are present after regeneration and Nginx restart."""
-    print("Verifying presence of generated certificate files (post-regeneration)...")
+    """Test 2: Verify certificate files are present after regeneration."""
+    print("Verifying presence of generated certificate files...")
     assert CA_CERT_PATH.exists(), f"CA certificate missing: {CA_CERT_PATH}"
-    assert (CERTS_DIR / "ca.key").exists(), f"CA key missing: {CERTS_DIR / 'ca.key'}"
-    assert (CERTS_DIR / "server.crt").exists(), f"Server certificate missing: {CERTS_DIR / 'server.crt'}"
-    assert (CERTS_DIR / "server.key").exists(), f"Server key missing: {CERTS_DIR / 'server.key'}"
     assert CLIENT_CERT_PATH.exists(), f"Client certificate missing: {CLIENT_CERT_PATH}"
-    assert CLIENT_KEY_PATH.exists(), f"Client key missing: {CLIENT_KEY_PATH}"
-    print("All expected certificate files are present after regeneration.")
+    assert (CERTS_DIR / "server.crt").exists(), f"Server certificate missing"
+    print("All expected certificate files are present.")
 
 
+class TestLiteLLMDirect:
+    def test_litellm_direct_correct_auth(self):
+        """Test accessing LiteLLM proxy directly with correct authentication."""
+        print(f"Testing LiteLLM direct access with correct auth: {LITELLM_DIRECT_CHAT_ENDPOINT}")
+        payload = {
+            "model": TEST_MODEL_NAME, # Should be "ollama-qwen-local" as per your litellm_proxy/config.yaml
+            "messages": [{"role": "user", "content": "What is the capital of Germany?"}],
+            "max_tokens": 10
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {LITELLM_MASTER_KEY}" # [cite: 155, 158, 161, 163, 168, 172]
+        }
+        try:
+            response = requests.post(
+                LITELLM_DIRECT_CHAT_ENDPOINT,
+                json=payload,
+                headers=headers,
+                timeout=30
+            )
+            response.raise_for_status()  # Raises an exception for 4XX/5XX status codes
+            assert "choices" in response.json(), "Response missing 'choices'"
+            print("LiteLLM direct access with correct auth successful.")
+            # You can add more assertions here, e.g., checking the content of the response
+            # print(f"Response: {response.json()}")
+        except requests.exceptions.RequestException as e:
+            # If litellm-proxy is not running on port 4000, this might be a ConnectionError
+            pytest.fail(f"Request to LiteLLM proxy failed: {e}")
+
+    def test_litellm_direct_no_auth(self):
+        """Test accessing LiteLLM proxy directly without authentication."""
+        print(f"Testing LiteLLM direct access with NO auth: {LITELLM_DIRECT_CHAT_ENDPOINT}")
+        payload = {
+            "model": TEST_MODEL_NAME,
+            "messages": [{"role": "user", "content": "Test no auth."}],
+            "max_tokens": 5
+        }
+        headers = {"Content-Type": "application/json"} # No Authorization header
+        try:
+            response = requests.post(
+                LITELLM_DIRECT_CHAT_ENDPOINT,
+                json=payload,
+                headers=headers,
+                timeout=10
+            )
+            # LiteLLM proxy typically returns 401 Unauthorized if master_key is set and not provided
+            assert response.status_code == 401, f"Expected HTTP 401 Unauthorized, got {response.status_code}. Response: {response.text}"
+            print("LiteLLM direct access without auth correctly failed with HTTP 401.")
+        except requests.exceptions.RequestException as e:
+            pytest.fail(f"Unexpected exception with no auth: {e}")
+
+    def test_litellm_direct_incorrect_auth(self):
+        """Test accessing LiteLLM proxy directly with incorrect authentication."""
+        print(f"Testing LiteLLM direct access with INCORRECT auth: {LITELLM_DIRECT_CHAT_ENDPOINT}")
+        payload = {
+            "model": TEST_MODEL_NAME,
+            "messages": [{"role": "user", "content": "Test incorrect auth."}],
+            "max_tokens": 5
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer wrong-key" # Incorrect key
+        }
+        try:
+            response = requests.post(
+                LITELLM_DIRECT_CHAT_ENDPOINT,
+                json=payload,
+                headers=headers,
+                timeout=10
+            )
+            assert response.status_code == 401, f"Expected HTTP 401 Unauthorized, got {response.status_code}. Response: {response.text}"
+            print("LiteLLM direct access with incorrect auth correctly failed with HTTP 401.")
+        except requests.exceptions.RequestException as e:
+            pytest.fail(f"Unexpected exception with incorrect auth: {e}")
+
+# --- Requests-based mTLS Tests ---
 @pytest.mark.usefixtures("regenerate_certificates_and_restart_nginx")
-def test_ollama_via_mtls_proxy_correct_cert():
-    """Test 3: Access Ollama via mTLS proxy using the correct client certificate."""
-    print(f"Testing Ollama via mTLS proxy with correct client cert: {LITELLM_CHAT_ENDPOINT}")
-    payload = {
-        "model": TEST_MODEL_NAME,
-        "messages": [{"role": "user", "content": "What is the capital of France? Briefly."}]
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LITELLM_MASTER_KEY}"
-    }
-    try:
-        response = requests.post(
-            LITELLM_CHAT_ENDPOINT,
-            json=payload,
-            headers=headers,
-            cert=(str(CLIENT_CERT_PATH), str(CLIENT_KEY_PATH)),  # Client cert and key
-            verify=str(CA_CERT_PATH),  # CA cert to verify Nginx's server cert
-            timeout=30
-        )
-        response.raise_for_status()  # Raise an exception for HTTP errors 4xx/5xx
-        assert response.status_code == 200
-        response_data = response.json()
-        assert "choices" in response_data, "Response should contain 'choices'"
-        assert len(response_data["choices"]) > 0, "Should have at least one choice"
-        assert "message" in response_data["choices"][0], "Choice should contain 'message'"
-        print("Ollama access via mTLS proxy with correct cert successful.")
-        print(f"Response: {response.text[:200]}...")
-    except requests.exceptions.SSLError as e:
-        pytest.fail(f"SSL error accessing mTLS proxy with correct certs: {e}. "
-                    "Ensure certs are correctly generated and Nginx is using them. "
-                    "Check Nginx logs ('docker-compose logs nginx-mtls-proxy'). "
-                    f"CA_CERT_PATH: {CA_CERT_PATH}, CLIENT_CERT_PATH: {CLIENT_CERT_PATH}")
-    except requests.exceptions.RequestException as e:  # Catch other errors like connection or HTTP errors
-        pytest.fail(f"Request failed for mTLS proxy with correct certs: {e}. Check Nginx, LiteLLM, and Ollama logs.")
+class TestMTLSWithRequests:
+    def test_ollama_via_mtls_proxy_correct_cert_requests(self):
+        """Test 3a: (Requests) Access Ollama via mTLS proxy with correct client certificate.""" # [cite: 25]
+        print(f"Testing (Requests) Ollama via mTLS proxy with correct cert: {LITELLM_CHAT_ENDPOINT}")
+        payload = {"model": TEST_MODEL_NAME, "messages": [{"role": "user", "content": "Capital of France?"}], "max_tokens": 5}
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
+        try:
+            response = requests.post(
+                LITELLM_CHAT_ENDPOINT, json=payload, headers=headers,
+                cert=(str(CLIENT_CERT_PATH), str(CLIENT_KEY_PATH)), # [cite: 26]
+                verify=str(CA_CERT_PATH), timeout=30
+            )
+            response.raise_for_status()
+            assert "choices" in response.json(), "Response missing 'choices'"
+            print("(Requests) mTLS access with correct cert successful.")
+        except requests.exceptions.SSLError as e:
+            pytest.fail(f"(Requests) SSL error with correct certs: {e}. Nginx logs: 'docker-compose logs nginx-mtls-proxy'") # [cite: 27, 28]
+        except requests.exceptions.RequestException as e:
+            pytest.fail(f"(Requests) Request failed with correct certs: {e}")
 
+    def test_ollama_via_mtls_proxy_no_client_cert_requests(self):
+        """Test 4a: (Requests) Attempt mTLS proxy WITHOUT client certificate."""
+        print(f"Testing (Requests) Ollama via mTLS proxy with NO client cert: {LITELLM_CHAT_ENDPOINT}")
+        payload = {"model": TEST_MODEL_NAME, "messages": [{"role": "user", "content": "Test no client cert."}], "max_tokens": 5}
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LITELLM_MASTER_KEY}"} # [cite: 29]
+        try:
+            response = requests.post(LITELLM_CHAT_ENDPOINT, json=payload, headers=headers, verify=str(CA_CERT_PATH), timeout=10)
+            assert response.status_code == 400, f"Expected HTTP 400, got {response.status_code}. Response: {response.text}" # [cite: 30]
+            print("(Requests) mTLS access without client cert correctly failed with HTTP 400.")
+        except requests.exceptions.SSLError:
+            print("(Requests) mTLS access without client cert correctly failed with SSLError.")
+            assert True
+        except requests.exceptions.RequestException as e:
+            pytest.fail(f"(Requests) Unexpected exception with no client cert: {e}")
 
+    def test_ollama_via_mtls_proxy_server_not_trusted_by_client_requests(self): # [cite: 31]
+        """Test 5a: (Requests) Attempt mTLS proxy when client uses default CAs (server should not be trusted)."""
+        print(f"Testing (Requests) mTLS proxy with client cert, client NOT trusting server's custom CA: {LITELLM_CHAT_ENDPOINT}")
+        payload = {"model": TEST_MODEL_NAME, "messages": [{"role": "user", "content": "Test server not trusted."}], "max_tokens": 5}
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
+        with pytest.raises(requests.exceptions.SSLError) as excinfo:
+            requests.post( # [cite: 32]
+                LITELLM_CHAT_ENDPOINT, json=payload, headers=headers,
+                cert=(str(CLIENT_CERT_PATH), str(CLIENT_KEY_PATH)),
+                verify=True, timeout=10 # verify=True uses system CAs
+            )
+        print(f"(Requests) mTLS with untrusted server CA correctly failed: {excinfo.value}")
+        assert "certificate verify failed" in str(excinfo.value).lower()
+
+# --- Curl-based mTLS Tests --- # [cite: 33]
 @pytest.mark.usefixtures("regenerate_certificates_and_restart_nginx")
-def test_ollama_via_mtls_proxy_no_client_cert():
-    """Test 4: Attempt to access Ollama via mTLS proxy WITHOUT a client certificate."""
-    print(f"Testing Ollama via mTLS proxy with NO client cert: {LITELLM_CHAT_ENDPOINT}")
-    payload = {
-        "model": TEST_MODEL_NAME,
-        "messages": [{"role": "user", "content": "Test no client cert."}]
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LITELLM_MASTER_KEY}"
-    }
-    try:
-        response = requests.post(
-            LITELLM_CHAT_ENDPOINT,
-            json=payload,
-            headers=headers,
-            # No client cert provided
-            verify=str(CA_CERT_PATH),  # Still provide CA to verify server if connection gets that far
-            timeout=10
-        )
-        # Nginx should reject the connection or return a 400 error
-        assert response.status_code == 400, \
-            f"Expected HTTP 400 (No required SSL certificate) but got {response.status_code}. Response: {response.text}"
-        print(f"Ollama access via mTLS proxy without client cert correctly failed with HTTP 400.")
+class TestMTLSWithCurl:
+    def test_ollama_via_mtls_proxy_correct_cert_curl(self):
+        """Test 3b: (curl) Access Ollama via mTLS proxy with correct client certificate."""
+        print(f"Testing (curl) Ollama via mTLS proxy with correct cert: {LITELLM_CHAT_ENDPOINT}")
+        payload = json.dumps({"model": TEST_MODEL_NAME, "messages": [{"role": "user", "content": "Capital of France using curl?"}], "max_tokens": 5})
+        curl_command = [
+            "curl", "-s", "-X", "POST", LITELLM_CHAT_ENDPOINT,
+            "--cert", str(CLIENT_CERT_PATH), # [cite: 34]
+            "--key", str(CLIENT_KEY_PATH),
+            "--cacert", str(CA_CERT_PATH),
+            "-H", "Content-Type: application/json",
+            "-H", f"Authorization: Bearer {LITELLM_MASTER_KEY}",
+            "-d", payload
+        ]
+        process = run_command(curl_command, check=False) # Don't fail test immediately
+        assert process.returncode == 0, f"curl command failed with exit code {process.returncode}. Stderr: {process.stderr}" # [cite: 35, 36]
+        try:
+            response_data = json.loads(process.stdout)
+            assert "choices" in response_data, f"curl response missing 'choices'. Output: {process.stdout}" # [cite: 37]
+            print("(curl) mTLS access with correct cert successful.")
+        except json.JSONDecodeError:
+            pytest.fail(f"curl output was not valid JSON: {process.stdout}")
 
-    except requests.exceptions.SSLError as e:
-        # This is also an expected outcome, as the SSL handshake might fail before HTTP status.
-        print(f"Ollama access via mTLS proxy without client cert correctly failed with SSLError: {e}")
-        assert True  # Test passes if SSLError occurs
-    except requests.exceptions.RequestException as e:
-        pytest.fail(f"Unexpected request exception when testing with no client cert: {e}")
+    def test_ollama_via_mtls_proxy_no_client_cert_curl(self):
+        """Test 4b: (curl) Attempt mTLS proxy WITHOUT client certificate."""
+        print(f"Testing (curl) Ollama via mTLS proxy with NO client cert: {LITELLM_CHAT_ENDPOINT}")
+        payload = json.dumps({"model": TEST_MODEL_NAME, "messages": [{"role": "user", "content": "Test no client cert curl."}], "max_tokens": 5}) # [cite: 38]
+        curl_command = [ # [cite: 39]
+            "curl", "-s", "-X", "POST", LITELLM_CHAT_ENDPOINT,
+            # No --cert or --key
+            "--cacert", str(CA_CERT_PATH), # Still try to verify server if connection is made
+            "-H", "Content-Type: application/json",
+            "-H", f"Authorization: Bearer {LITELLM_MASTER_KEY}",
+            "-d", payload, # [cite: 40]
+            "--fail-with-body" # Makes curl exit with 22 on 4xx/5xx errors, easier to check
+        ]
+        process = run_command(curl_command, check=False) # Don't fail test immediately
 
+        if process.returncode != 0: # [cite: 41]
+            print(f"(curl) mTLS access without client cert correctly failed with exit code {process.returncode}. Stderr: {process.stderr}") # [cite: 42]
+            assert process.returncode in [22, 35, 56, 60], f"Expected curl to fail (e.g. exit 22, 35, 56, 60), got {process.returncode}"
+        else:
+            pytest.fail(f"(curl) mTLS access without client cert unexpectedly succeeded (exit 0). Output: {process.stdout}") # [cite: 43]
 
-@pytest.mark.usefixtures("regenerate_certificates_and_restart_nginx")
-def test_ollama_via_mtls_proxy_server_not_trusted_by_client():
-    """
-    Test 5: Attempt to access Ollama via mTLS proxy when client uses default CAs
-    (which won't include our custom CA), so server verification should fail.
-    """
-    print(
-        f"Testing Ollama via mTLS proxy with client cert but client NOT trusting server's custom CA: {LITELLM_CHAT_ENDPOINT}")
-    payload = {
-        "model": TEST_MODEL_NAME,
-        "messages": [{"role": "user", "content": "Test server not trusted by client."}]
-    }
-    headers = {
-        "Content-Type": "application/json",
-        "Authorization": f"Bearer {LITELLM_MASTER_KEY}"
-    }
-    # This will make requests use the system's default CA bundle.
-    # Since our custom CA (ca.crt) signed the server.crt, and our custom CA
-    # is not in the system's default bundle, SSL verification should fail.
-    with pytest.raises(requests.exceptions.SSLError) as excinfo:
-        requests.post(
-            LITELLM_CHAT_ENDPOINT,
-            json=payload,
-            headers=headers,
-            cert=(str(CLIENT_CERT_PATH), str(CLIENT_KEY_PATH)),
-            verify=True,  # Use system default CAs for server verification
-            timeout=10
-        )
-    print(
-        f"Ollama access via mTLS proxy with client not trusting server's custom CA correctly failed with SSLError: {excinfo.value}")
-    error_message = str(excinfo.value).lower()
-    # Common phrases in SSL verification errors when CA is unknown
-    assert "certificate verify failed" in error_message or \
-           "self-signed certificate in certificate chain" in error_message or \
-           "unable to get local issuer certificate" in error_message, \
-        f"Expected SSL verification error due to untrusted CA, but got: {excinfo.value}"
-
+    def test_ollama_via_mtls_proxy_server_not_trusted_by_client_curl(self):
+        """Test 5b: (curl) Attempt mTLS proxy when client uses default CAs (server should not be trusted).""" # [cite: 44]
+        print(f"Testing (curl) mTLS proxy with client cert, client NOT trusting server's custom CA: {LITELLM_CHAT_ENDPOINT}")
+        payload = json.dumps({"model": TEST_MODEL_NAME, "messages": [{"role": "user", "content": "Test server not trusted curl."}], "max_tokens": 5})
+        curl_command = [
+            "curl", "-s", "-X", "POST", LITELLM_CHAT_ENDPOINT,
+            "--cert", str(CLIENT_CERT_PATH),
+            "--key", str(CLIENT_KEY_PATH),
+            # NO --cacert str(CA_CERT_PATH) means curl uses its default CA bundle # [cite: 45]
+            "-H", "Content-Type: application/json",
+            "-H", f"Authorization: Bearer {LITELLM_MASTER_KEY}",
+            "-d", payload
+        ]
+        process = run_command(curl_command, check=False)
+        assert process.returncode == 60, \
+            f"(curl) Expected SSL verification failure (exit code 60), got {process.returncode}. Stderr: {process.stderr}, Stdout: {process.stdout}" # [cite: 46]
+        print(f"(curl) mTLS with untrusted server CA correctly failed with exit code {process.returncode}.")

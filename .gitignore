@@ -3,3 +3,4 @@ certs/*
 .idea-old
 .venv-old
 **/__pycache__/
+.env

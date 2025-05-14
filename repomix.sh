@@ -1,2 +1,2 @@
-repomix -o repomix.txt -i .jj,.venv
+repomix -o project_contents.txt -i .jj,.venv
 

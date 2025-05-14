@@ -1,2 +1,6 @@
 pytest
 requests
+litellm
+openai
+python-dotenv
+pytest-asyncio

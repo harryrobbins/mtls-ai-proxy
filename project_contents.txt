@@ -1,0 +1,1311 @@
+This file is a merged representation of a subset of the codebase, containing files not matching ignore patterns, combined into a single document by Repomix.
+
+<file_summary>
+This section contains a summary of this file.
+
+<purpose>
+This file contains a packed representation of the entire repository's contents.
+It is designed to be easily consumable by AI systems for analysis, code review,
+or other automated processes.
+</purpose>
+
+<file_format>
+The content is organized as follows:
+1. This summary section
+2. Repository information
+3. Directory structure
+4. Repository files (if enabled)
+4. Repository files, each consisting of:
+  - File path as an attribute
+  - Full contents of the file
+</file_format>
+
+<usage_guidelines>
+- This file should be treated as read-only. Any changes should be made to the
+  original repository files, not this packed version.
+- When processing this file, use the file path to distinguish
+  between different files in the repository.
+- Be aware that this file may contain sensitive information. Handle it with
+  the same level of security as you would the original repository.
+</usage_guidelines>
+
+<notes>
+- Some files may have been excluded based on .gitignore rules and Repomix's configuration
+- Binary files are not included in this packed representation. Please refer to the Repository Structure section for a complete list of file paths, including binary files
+- Files matching these patterns are excluded: .jj, .venv
+- Files matching patterns in .gitignore are excluded
+- Files matching default ignore patterns are excluded
+- Files are sorted by Git change count (files with more changes are at the bottom)
+</notes>
+
+<additional_info>
+
+</additional_info>
+
+</file_summary>
+
+<directory_structure>
+cert-generator/
+  Dockerfile
+  generate_certs.sh
+  openssl_ca.cnf
+  openssl_server.cnf
+litellm_proxy/
+  config.yaml
+nginx/
+  nginx.conf
+ollama/
+  Dockerfile
+  entrypoint.sh
+python-client/
+  main.py
+tests/
+  test_litellm_sdk_integration.py
+  test_ollama_setup.py
+.gitignore
+docker-compose.yml
+imports.py
+README.md
+repomix.sh
+requirements.txt
+</directory_structure>
+
+<files>
+This section contains the contents of the repository's files.
+
+<file path="cert-generator/Dockerfile">
+# cert-generator/Dockerfile
+FROM alpine:latest
+
+# Add openssl
+RUN apk add --no-cache openssl
+
+WORKDIR /certs
+
+# Copy the script and the new OpenSSL CA config file
+COPY generate_certs.sh .
+COPY openssl_ca.cnf .
+COPY openssl_server.cnf .
+
+RUN chmod +x generate_certs.sh
+
+CMD ["./generate_certs.sh"]
+</file>
+
+<file path="cert-generator/generate_certs.sh">
+#!/bin/sh
+set -e
+
+# Output directory inside the container, mapped from host's ./certs
+OUTPUT_DIR="/certs_output"
+CONFIG_DIR="/certs" # Directory where OpenSSL config files are copied in Dockerfile
+
+# Check if certificates already exist to avoid overwriting unless forced
+if [ -f "$OUTPUT_DIR/ca.crt" ] && [ "$FORCE_REGENERATE" != "true" ]; then
+  echo "Certificates already exist in $OUTPUT_DIR. Skipping generation."
+  echo "Set FORCE_REGENERATE=true to overwrite."
+  exit 0
+fi
+
+echo "Generating new certificates in $CONFIG_DIR, will be copied to $OUTPUT_DIR ..."
+
+# --- CA Certificate ---
+echo "1. Generating CA private key (ca.key)..."
+openssl genrsa -out "$CONFIG_DIR/ca.key" 2048
+
+echo "2. Generating CA certificate (ca.crt) using $CONFIG_DIR/openssl_ca.cnf ..."
+openssl req -x509 -new -nodes -key "$CONFIG_DIR/ca.key" \
+  -sha256 -days 3650 \
+  -subj "/C=XX/ST=Testland/L=TestCity/O=LocalTestOrg/OU=DevOps/CN=LocalTestCA" \
+  -config "$CONFIG_DIR/openssl_ca.cnf" \
+  -extensions v3_ca \
+  -out "$CONFIG_DIR/ca.crt"
+
+# --- Server Certificate ---
+echo "3. Generating Server private key (server.key)..."
+openssl genrsa -out "$CONFIG_DIR/server.key" 2048
+
+echo "4. Generating Server Certificate Signing Request (server.csr) with SAN using $CONFIG_DIR/openssl_server.cnf ..."
+# Pass the config file to req to include extensions (like SAN) in the CSR itself
+openssl req -new -key "$CONFIG_DIR/server.key" \
+  -subj "/C=XX/ST=Testland/L=TestCity/O=LocalTestOrg/OU=Server/CN=localhost" \
+  -config "$CONFIG_DIR/openssl_server.cnf" \
+  -reqexts v3_req \
+  -out "$CONFIG_DIR/server.csr"
+
+echo "5. Signing the Server CSR with the CA (server.crt)..."
+# When signing, explicitly copy extensions from the CSR to the certificate
+openssl x509 -req -in "$CONFIG_DIR/server.csr" \
+  -CA "$CONFIG_DIR/ca.crt" -CAkey "$CONFIG_DIR/ca.key" \
+  -CAcreateserial \
+  -days 3600 -sha256 \
+  -copy_extensions copyall \
+  -out "$CONFIG_DIR/server.crt"
+
+# --- Client Certificate ---
+echo "6. Generating Client private key (client.key)..."
+openssl genrsa -out "$CONFIG_DIR/client.key" 2048
+
+echo "7. Generating Client Certificate Signing Request (client.csr)..."
+# For client certs, SAN is less common unless specific use cases demand it.
+# We'll keep it simple for now. CN=TestClient should be sufficient for client auth.
+openssl req -new -key "$CONFIG_DIR/client.key" \
+  -subj "/C=XX/ST=Testland/L=TestCity/O=LocalTestOrg/OU=Client/CN=TestClient" \
+  -out "$CONFIG_DIR/client.csr"
+
+echo "8. Signing the Client CSR with the CA (client.crt)..."
+openssl x509 -req -in "$CONFIG_DIR/client.csr" \
+  -CA "$CONFIG_DIR/ca.crt" -CAkey "$CONFIG_DIR/ca.key" \
+  -CAcreateserial \
+  -days 3600 -sha256 \
+  -out "$CONFIG_DIR/client.crt"
+  # Add extensions for client if needed, e.g., clientAuth in extendedKeyUsage
+  # For example: -extfile openssl_client.cnf -extensions v3_client
+
+# Clean up CSR files and serial files from the generation directory
+rm "$CONFIG_DIR"/*.csr
+rm "$CONFIG_DIR"/*.srl 2>/dev/null || true
+
+
+echo "Certificates generated successfully in $CONFIG_DIR."
+
+if [ -d "$OUTPUT_DIR" ]; then
+  echo "Copying certificates to $OUTPUT_DIR..."
+  if [ "$FORCE_REGENERATE" = "true" ]; then
+    rm -f "$OUTPUT_DIR"/*.*
+  fi
+  cp "$CONFIG_DIR/ca.crt" "$CONFIG_DIR/ca.key" \
+     "$CONFIG_DIR/client.crt" "$CONFIG_DIR/client.key" \
+     "$CONFIG_DIR/server.crt" "$CONFIG_DIR/server.key" \
+     "$OUTPUT_DIR/"
+  echo "Certificates copied to $OUTPUT_DIR."
+else
+  echo "Warning: $OUTPUT_DIR directory not found. Certificates remain in the container's $CONFIG_DIR directory."
+fi
+
+echo "Certificate generation complete."
+</file>
+
+<file path="cert-generator/openssl_ca.cnf">
+# cert-generator/openssl_ca.cnf
+
+[ req ]
+distinguished_name = req_distinguished_name
+x509_extensions    = v3_ca  # The extensions to add to the self-signed cert
+prompt             = no     # Don't prompt for DN, use subj from command line
+
+[ req_distinguished_name ]
+# Subject details are provided via -subj on the command line
+# For example:
+# C            = XX
+# ST           = Testland
+# L            = TestCity
+# O            = LocalTestOrg
+# OU           = DevOps
+# CN           = LocalTestCA
+
+[ v3_ca ]
+# Extensions for a typical CA
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints       = critical, CA:TRUE
+keyUsage               = critical, digitalSignature, cRLSign, keyCertSign
+</file>
+
+<file path="cert-generator/openssl_server.cnf">
+# cert-generator/openssl_server.cnf
+
+[ req ]
+distinguished_name = req_distinguished_name
+req_extensions     = v3_req # Extensions for the CSR
+prompt             = no
+
+[ req_distinguished_name ]
+# Subject details are provided via -subj on the command line
+
+[ v3_req ]
+basicConstraints = CA:FALSE
+keyUsage = nonRepudiation, digitalSignature, keyEncipherment
+subjectAltName = @alt_names
+
+[ alt_names ]
+DNS.1 = localhost
+DNS.2 = nginx-mtls-proxy
+# Added for internal Docker network access
+# If you needed to support IP addresses, you could add:
+IP.1 = 127.0.0.1
+</file>
+
+<file path="litellm_proxy/config.yaml">
+# litellm_proxy/config.yaml
+model_list:
+  - model_name: ollama-qwen-local # Name for accessing this model via the proxy
+    litellm_params:
+      model: ollama/qwen3:0.6b # Tells LiteLLM to use Ollama provider + specific model tag
+      api_base: http://ollama:11434 # Internal docker network address for Ollama service
+      # No api_key needed for local Ollama
+
+litellm_settings:
+ general_settings:
+   master_key: sk-1234 # Master key for LiteLLM proxy auth (not for Ollama)
+</file>
+
+<file path="nginx/nginx.conf">
+# nginx/nginx.conf
+worker_processes 1;
+
+events {
+    worker_connections 1024;
+}
+
+http {
+    upstream backend {
+        # 'litellm-proxy' is the service name in docker-compose.yml
+        # Port 4000 is the default LiteLLM proxy port
+        server litellm-proxy:4000;
+    }
+
+    server {
+        listen 443 ssl;
+        server_name localhost; # Match the CN used in server cert
+
+        # --- SSL/TLS Server Config ---
+        ssl_certificate /etc/nginx/certs/server.crt;
+        ssl_certificate_key /etc/nginx/certs/server.key;
+
+        # --- mTLS Client Verification ---
+        ssl_client_certificate /etc/nginx/certs/ca.crt; # CA cert to verify client certs
+        ssl_verify_client on;                          # Require client cert
+        ssl_verify_depth 1;                            # Adjust if using intermediate CAs
+
+        # Optional: Send client cert info to backend (if needed)
+        # proxy_set_header X-SSL-Client-Cert $ssl_client_escaped_cert;
+        # proxy_set_header X-SSL-Client-Verify $ssl_client_verify;
+        # proxy_set_header X-SSL-Client-Subject $ssl_client_s_dn;
+
+        location / {
+            proxy_pass http://backend; # Forward to the upstream backend service
+            proxy_set_header Host $host;
+            proxy_set_header X-Real-IP $remote_addr;
+            proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
+            proxy_set_header X-Forwarded-Proto $scheme;
+
+            # WebSocket support for streaming if LiteLLM uses it
+            proxy_http_version 1.1;
+            proxy_set_header Upgrade $http_upgrade;
+            proxy_set_header Connection "upgrade";
+            proxy_read_timeout 86400; # Long timeout for streaming
+            proxy_buffering off;      # Disable buffering for SSE/WebSockets
+        }
+    }
+}
+</file>
+
+<file path="ollama/Dockerfile">
+FROM ollama/ollama
+
+COPY entrypoint.sh /entrypoint.sh
+RUN chmod +x /entrypoint.sh
+
+ENTRYPOINT ["/entrypoint.sh"]
+</file>
+
+<file path="ollama/entrypoint.sh">
+#!/bin/sh
+set -e # Exit immediately if a command exits with a non-zero status.
+
+LOG_FILE="/tmp/ollama_serve.log"
+
+echo "Ollama entrypoint script started."
+echo "Logging ollama serve output to $LOG_FILE"
+
+# Start ollama serve in the background, redirecting its stdout and stderr
+ollama serve > "$LOG_FILE" 2>&1 &
+pid=$! # Get the process ID of ollama serve
+
+# Function to print last few lines of log and kill ollama
+fail_and_exit() {
+  echo "Ollama failed. Last lines from $LOG_FILE:"
+  tail -n 30 "$LOG_FILE" # Print last 30 lines for debugging
+  kill $pid >/dev/null 2>&1 || true # Try to kill the background ollama serve process
+  echo "Exiting."
+  exit 1
+}
+
+# Wait for Ollama server to be responsive using "ollama ps"
+echo "Waiting for Ollama server to become responsive..."
+count=0
+max_count=60 # Wait for max 60 seconds
+until ollama ps >/dev/null 2>&1; do
+  # Check if the background process is still alive
+  if ! ps -p $pid > /dev/null; then
+    echo "Ollama serve process (PID: $pid) died unexpectedly."
+    fail_and_exit
+  fi
+  sleep 1
+  count=$((count+1))
+  if [ "$count" -ge "$max_count" ]; then
+    echo "Ollama server failed to become responsive (ollama ps) within $max_count seconds."
+    fail_and_exit
+  fi
+  printf "."
+done
+echo "" # Newline after dots
+echo "Ollama server is responsive."
+echo "--- Current content of $LOG_FILE (first 20 lines): ---"
+head -n 20 "$LOG_FILE"
+echo "-------------------------------------------------------"
+
+
+# Pull the specified model
+MODEL_TO_PULL=${OLLAMA_PULL_MODEL:-qwen3:0.6b}
+echo "Pulling model: $MODEL_TO_PULL ..."
+if ! ollama pull "$MODEL_TO_PULL"; then
+    echo "Failed to pull model $MODEL_TO_PULL."
+    echo "--- Content of $LOG_FILE on pull failure: ---"
+    cat "$LOG_FILE"
+    echo "----------------------------------------------"
+    kill $pid >/dev/null 2>&1 || true
+    exit 1
+fi
+echo "Model $MODEL_TO_PULL pulled successfully or already exists."
+
+echo "Ollama is running with model $MODEL_TO_PULL. PID: $pid"
+wait $pid
+
+echo "Ollama serve process (PID: $pid) has exited."
+echo "--- Final content of $LOG_FILE: ---"
+cat "$LOG_FILE"
+echo "----------------------------------"
+exit 0
+</file>
+
+<file path="python-client/main.py">
+import os
+
+import litellm
+from litellm import CustomLLM, completion, get_llm_provider, acompletion
+import asyncio
+
+base_model = os.getenv("BASE_MODEL")
+ollama_model = "ollama/" + base_model
+litellm_proxy_model = "litellm_proxy/ollama-qwen-local"
+litellm_proxy_key = "sk-1234"
+
+
+
+# test we can use the sdk to communicate with ollama directly
+resp = completion(
+        model=ollama_model,
+        messages=[{"role": "user", "content": "Hello world!"}],
+        max_tokens=5,
+        base_url="http://localhost:11434",
+    )
+
+print( resp.choices[0].message.content )
+
+
+
+# test we can communicate with ollama via the litellm proxy
+resp = completion(
+        model=litellm_proxy_model,
+        messages=[{"role": "user", "content": "Hello world!"}],
+        max_tokens=5,
+        base_url="http://localhost:4000",
+        api_key=litellm_proxy_key
+    )
+
+print( resp.choices[0].message.content )
+
+### tests using pass-through custom handler
+
+class OllamaProxyLLM(CustomLLM):
+    def completion(self, *args, **kwargs) -> litellm.ModelResponse:
+        return litellm.completion(
+            model=ollama_model,
+            messages=[{"role": "user", "content": "tell me a short joke about a llama"}],
+        )  # type: ignore
+
+    async def acompletion(self, *args, **kwargs) -> litellm.ModelResponse:
+        return litellm.completion(
+            model=ollama_model,
+            messages=[{"role": "user", "content": "tell me a short joke about a waiting"}],
+        )  # type: ignore
+
+
+my_ollama_proxy_llm = OllamaProxyLLM()
+
+litellm.custom_provider_map = [  # 👈 KEY STEP - REGISTER HANDLER
+    {"provider": "ollama_proxy_llm", "custom_handler": my_ollama_proxy_llm}
+]
+
+
+# test the proxy works with synchronous calls
+resp = completion(
+    model="ollama_proxy_llm/my-fake-model",
+    messages=[{"role": "user", "content": "Hello world!"}],
+)
+
+print(resp.choices[0].message.content)
+
+# test the proxy works with asynchronous calls
+resp = asyncio.run(acompletion(
+    model="ollama_proxy_llm/anything-goes-here",
+    messages=[{"role": "user", "content": "Hello world!"}],
+))
+
+print(resp.choices[0].message.content)
+</file>
+
+<file path="tests/test_litellm_sdk_integration.py">
+# test_litellm_integrations.py
+import pytest
+import litellm
+from litellm import CustomLLM, completion, ModelResponse
+import warnings  # Added for warning suppression
+import os  # For accessing environment variables
+from dotenv import load_dotenv  # For loading .env file
+
+# Load environment variables from .env file
+load_dotenv()
+
+
+# Fixture to register the custom LLM provider once for the tests that need it
+@pytest.fixture(scope="module")
+def register_custom_llm():
+    """
+    Registers a custom LLM provider for testing purposes.
+    This fixture has a 'module' scope, meaning it will run once per test module.
+    """
+
+    class MyCustomLLM(CustomLLM):
+        """
+        A simple custom LLM that returns a mock response.
+        """
+
+        def completion(self, *args, **kwargs) -> ModelResponse:
+            """
+            Simulates a completion call and returns a predefined mock response.
+            """
+            response = ModelResponse(
+                id="chatcmpl-mock",
+                choices=[{
+                    "finish_reason": "stop",
+                    "index": 0,
+                    "message": {"role": "assistant", "content": "Hi!"}
+                }],
+                created=1677652288,  # Example timestamp
+                model="gpt-3.5-turbo",  # Mock model
+                object="chat.completion",
+                system_fingerprint="fp_mock_system",  # Example fingerprint
+                usage={"prompt_tokens": 0, "completion_tokens": 0, "total_tokens": 0}  # Example usage
+            )
+            return response
+
+        def embedding(self, *args, **kwargs):  # type: ignore
+            raise NotImplementedError("Embedding not implemented for this custom LLM")
+
+    my_custom_llm_instance = MyCustomLLM()
+
+    # Store original map if it exists
+    original_custom_provider_map = litellm.custom_provider_map.copy() if hasattr(litellm, 'custom_provider_map') else {}
+
+    litellm.custom_provider_map = [
+        {"provider": "my-custom-llm", "custom_handler": my_custom_llm_instance}
+    ]
+
+    yield  # This allows the tests to run
+
+    # Teardown: Restore original map
+    litellm.custom_provider_map = original_custom_provider_map
+
+
+def test_custom_llm_completion(register_custom_llm):  # register_custom_llm fixture is used here
+    """
+    Tests the custom LLM provider.
+    It uses the 'register_custom_llm' fixture to ensure the provider is registered.
+    """
+    try:
+        resp = completion(
+            model="my-custom-llm/my-fake-model",
+            messages=[{"role": "user", "content": "Hello world!"}],
+        )
+        assert resp.choices[0].message.content == "Hi!", "Custom LLM did not return the expected mock response."
+    except Exception as e:
+        pytest.fail(f"Custom LLM completion test failed with an exception: {e}")
+
+
+def test_ollama_direct_completion():
+    """
+    Tests direct completion with an Ollama model loaded from .env file.
+    Assumes Ollama server is running at http://localhost:11434.
+    Requires OLLAMA_MODEL_NAME to be set in the .env file (e.g., "ollama/qwen3:0.6b").
+    """
+    ollama_model = os.getenv("OLLAMA_MODEL_NAME")
+    if not ollama_model:
+        pytest.skip("OLLAMA_MODEL_NAME not set in .env file. Skipping Ollama direct test.")
+        return  # Ensure the function exits if skipping
+
+    # Suppress the specific DeprecationWarning from httpx
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=DeprecationWarning,
+            message="Use 'content=<...>' to upload raw bytes/text content.",
+            module="httpx._models"
+        )
+        try:
+            print(f"\nAttempting to use Ollama model: {ollama_model}")  # For debugging
+            resp = completion(
+                model=ollama_model,
+                messages=[{"role": "user", "content": "Hello world!"}],
+                max_tokens=5,
+                base_url="http://localhost:11434",
+                timeout=30
+            )
+            assert resp.choices[0].message.content is not None, "Ollama response content is None."
+            assert isinstance(resp.choices[0].message.content, str), "Ollama response content is not a string."
+            assert len(resp.choices[0].message.content) > 0, "Ollama response content is empty."
+            print(f"\nOllama Direct Response ({ollama_model}): {resp.choices[0].message.content}")
+        except litellm.exceptions.APIConnectionError as e:
+            pytest.fail(
+                f"Ollama direct completion test failed. Could not connect to Ollama at http://localhost:11434. Ensure Ollama is running and the model '{ollama_model}' is pulled. Error: {e}")
+        except litellm.exceptions.BadRequestError as e:  # Catch errors if model is not found by Ollama
+            pytest.fail(
+                f"Ollama direct completion test failed. BadRequestError: Ensure the model '{ollama_model}' is available in your Ollama instance. Error: {e}")
+        except Exception as e:
+            pytest.fail(f"Ollama direct completion test failed with an exception: {e}")
+
+
+def test_litellm_proxy_completion():
+    """
+    Tests completion with a LiteLLM Proxy model.
+    Assumes LiteLLM Proxy server is running at http://localhost:4000
+    and configured with the model 'ollama-qwen-local'.
+    """
+    litellm_proxy_model = "litellm_proxy/ollama-qwen-local"
+    litellm_proxy_key = "sk-1234"
+
+    # Suppress the specific DeprecationWarning from httpx
+    with warnings.catch_warnings():
+        warnings.filterwarnings(
+            "ignore",
+            category=DeprecationWarning,
+            message="Use 'content=<...>' to upload raw bytes/text content.",
+            module="httpx._models"
+        )
+        try:
+            resp = completion(
+                model=litellm_proxy_model,
+                messages=[{"role": "user", "content": "Hello world!"}],
+                max_tokens=5,
+                base_url="http://localhost:4000",
+                api_key=litellm_proxy_key,
+                timeout=30
+            )
+            assert resp.choices[0].message.content is not None, "LiteLLM Proxy response content is None."
+            assert isinstance(resp.choices[0].message.content, str), "LiteLLM Proxy response content is not a string."
+            assert len(resp.choices[0].message.content) > 0, "LiteLLM Proxy response content is empty."
+            print(f"\nLiteLLM Proxy Response: {resp.choices[0].message.content}")
+        except litellm.exceptions.APIConnectionError as e:
+            pytest.fail(
+                f"LiteLLM Proxy completion test failed. Could not connect to LiteLLM Proxy at http://localhost:4000. Error: {e}")
+        except Exception as e:
+            pytest.fail(f"LiteLLM Proxy completion test failed with an exception: {e}")
+
+# To run these tests:
+# 1. Create a .env file in the same directory with: OLLAMA_MODEL_NAME="ollama/qwen3:0.6b" (or your desired model)
+# 2. Save this file as `test_litellm_integrations.py` (or any name starting with `test_`).
+# 3. Make sure `pytest`, `litellm`, and `python-dotenv` are installed (`pip install pytest litellm python-dotenv`).
+# 4. Ensure your Ollama server (and the model specified in .env is pulled) and LiteLLM Proxy are running.
+# 5. Open your terminal in the directory where you saved the file and run: `pytest -s -v`
+</file>
+
+<file path="tests/test_ollama_setup.py">
+import pytest
+import requests
+import subprocess
+import os
+import time
+from pathlib import Path
+import json # For parsing curl output
+from dotenv import load_dotenv  # For loading .env file
+
+# Load environment variables from .env file
+load_dotenv()
+
+# --- Configuration ---
+BASE_DIR = Path(__file__).resolve().parent.parent
+CERTS_DIR = BASE_DIR / "certs"
+CLIENT_CERT_PATH = CERTS_DIR / "client.crt"
+CLIENT_KEY_PATH = CERTS_DIR / "client.key"
+CA_CERT_PATH = CERTS_DIR / "ca.crt"
+
+OLLAMA_DIRECT_URL = "http://127.0.0.1:11434"
+OLLAMA_TAGS_ENDPOINT = f"{OLLAMA_DIRECT_URL}/api/tags"
+LITELLM_DIRECT_URL = "http://localhost:4000"  # As per docker-compose.yml [cite: 176] and python-client/main.py [cite: 140]
+LITELLM_DIRECT_CHAT_ENDPOINT = f"{LITELLM_DIRECT_URL}/chat/completions"
+MTLS_PROXY_URL = "https://localhost:8443"
+LITELLM_CHAT_ENDPOINT = f"{MTLS_PROXY_URL}/chat/completions"
+
+TEST_MODEL_NAME = "ollama-qwen-local"
+LITELLM_MASTER_KEY = "sk-1234"
+
+MAX_READINESS_WAIT_SECONDS = 60
+READINESS_CHECK_INTERVAL_SECONDS = 5
+
+
+
+# --- Helper Functions ---
+
+def run_command(command_list, cwd=None, check=True, capture_output=True, text=True, env_vars=None):
+    """Runs a generic command using subprocess."""
+    print(f"Running command: {' '.join(command_list)}")
+    effective_env = {**os.environ, **(env_vars or {})}
+    try: # [cite: 13]
+        process = subprocess.run(
+            command_list,
+            cwd=cwd or BASE_DIR,
+            capture_output=capture_output,
+            text=text,
+            check=check,
+            env=effective_env
+        )
+        if capture_output: # [cite: 14]
+            if process.stdout and process.stdout.strip():
+                print(f"Command stdout:\n{process.stdout.strip()}")
+            if process.stderr and process.stderr.strip():
+                print(f"Command stderr:\n{process.stderr.strip()}")
+        return process
+    except subprocess.CalledProcessError as e:
+        print(f"Error running command: {' '.join(command_list)}")
+        print(f"Return code: {e.returncode}") # [cite: 15]
+        if capture_output:
+            if e.stdout and e.stdout.strip():
+                print(f"Stdout:\n{e.stdout.strip()}")
+            if e.stderr and e.stderr.strip():
+                print(f"Stderr:\n{e.stderr.strip()}")
+        if check:
+            pytest.fail(f"Command failed: {' '.join(command_list)}. Error: {e.stderr or e.stdout or 'Unknown error'}") # [cite: 16]
+    except FileNotFoundError:
+        pytest.fail(f"Command {command_list[0]} not found. Is it installed and in PATH?")
+
+
+def run_docker_compose_command(command_args, env_vars=None, check=True):
+    """Wrapper for docker-compose commands."""
+    return run_command(["docker-compose"] + command_args, env_vars=env_vars, check=check)
+
+
+# --- Pytest Fixtures ---
+
+@pytest.fixture(scope="session", autouse=True)
+def ensure_services_are_up():
+    print("Checking if essential Docker services are running and Ollama is responsive...")
+    print(f"Will wait up to {MAX_READINESS_WAIT_SECONDS} seconds for Ollama at {OLLAMA_TAGS_ENDPOINT}.")
+    start_time = time.time()
+    ollama_ready = False
+    last_exception = None
+    while time.time() - start_time < MAX_READINESS_WAIT_SECONDS: # [cite: 17]
+        try:
+            print(f"Attempting to connect to Ollama at {OLLAMA_TAGS_ENDPOINT} (Attempt {int((time.time() - start_time) / READINESS_CHECK_INTERVAL_SECONDS) + 1})")
+            response = requests.get(OLLAMA_TAGS_ENDPOINT, timeout=5)
+            response.raise_for_status()
+            if response.status_code == 200 and "models" in response.json():
+                print("Ollama is responsive and returned model list.") # [cite: 18]
+                ollama_ready = True
+                break
+            else:
+                last_exception = Exception(f"Ollama format unexpected: {response.text[:100]}")
+        except requests.exceptions.RequestException as e:
+            last_exception = e # [cite: 19]
+            print(f"Error connecting to Ollama or unexpected response. Retrying... Error: {e}") # [cite: 20]
+        time.sleep(READINESS_CHECK_INTERVAL_SECONDS)
+    if not ollama_ready:
+        pytest.fail(
+            f"Ollama service at {OLLAMA_TAGS_ENDPOINT} did not become responsive "
+            f"within {MAX_READINESS_WAIT_SECONDS} seconds. Last error: {last_exception}\n"
+            "Ensure services are up: 'docker-compose up -d ollama litellm-proxy nginx-mtls-proxy'. "
+            "Check logs: 'docker-compose logs ollama'."
+        ) # [cite: 21]
+    print("Ollama confirmed ready. Giving a brief moment for other services...")
+    time.sleep(5)
+
+@pytest.fixture(scope="module")
+def regenerate_certificates_and_restart_nginx():
+    print("Regenerating certificates with SAN for server and restarting Nginx...")
+    CERTS_DIR.mkdir(parents=True, exist_ok=True)
+    # Rebuild cert-generator if Dockerfile changed (e.g., new openssl_server.cnf)
+    run_docker_compose_command(["build", "cert-generator"])
+    run_docker_compose_command(["run", "--rm", "-e", "FORCE_REGENERATE=true", "cert-generator"])
+    print("Certificates regenerated.")
+    expected_certs = [CA_CERT_PATH, CLIENT_CERT_PATH, CLIENT_KEY_PATH, CERTS_DIR / "server.crt", CERTS_DIR / "server.key"]
+    if any(not cert.exists() for cert in expected_certs):
+        pytest.fail(f"Missing cert files after generation: {[str(c) for c in expected_certs if not c.exists()]}") # [cite: 22]
+    print("Restarting Nginx proxy...")
+    run_docker_compose_command(["restart", "nginx-mtls-proxy"])
+    print("Nginx restarted. Allowing a moment for it to initialize...") # [cite: 23]
+    time.sleep(5)
+    return True
+
+# --- Test Cases ---
+
+def test_ollama_direct_accessible():
+    """Test 1: Check if Ollama service is directly accessible."""
+    print(f"Testing direct Ollama access at {OLLAMA_TAGS_ENDPOINT}")
+    try:
+        response = requests.get(OLLAMA_TAGS_ENDPOINT, timeout=10)
+        response.raise_for_status()
+        assert "models" in response.json(), "Ollama /api/tags response invalid"
+        print("Ollama direct access successful.")
+    except requests.exceptions.RequestException as e:
+        pytest.fail(f"Failed to connect to Ollama directly at {OLLAMA_TAGS_ENDPOINT}: {e}") # [cite: 24]
+
+@pytest.mark.usefixtures("regenerate_certificates_and_restart_nginx")
+def test_certificates_are_present_after_regeneration():
+    """Test 2: Verify certificate files are present after regeneration."""
+    print("Verifying presence of generated certificate files...")
+    assert CA_CERT_PATH.exists(), f"CA certificate missing: {CA_CERT_PATH}"
+    assert CLIENT_CERT_PATH.exists(), f"Client certificate missing: {CLIENT_CERT_PATH}"
+    assert (CERTS_DIR / "server.crt").exists(), f"Server certificate missing"
+    print("All expected certificate files are present.")
+
+
+class TestLiteLLMDirect:
+    def test_litellm_direct_correct_auth(self):
+        """Test accessing LiteLLM proxy directly with correct authentication."""
+        print(f"Testing LiteLLM direct access with correct auth: {LITELLM_DIRECT_CHAT_ENDPOINT}")
+        payload = {
+            "model": TEST_MODEL_NAME, # Should be "ollama-qwen-local" as per your litellm_proxy/config.yaml
+            "messages": [{"role": "user", "content": "What is the capital of Germany?"}],
+            "max_tokens": 10
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": f"Bearer {LITELLM_MASTER_KEY}" # [cite: 155, 158, 161, 163, 168, 172]
+        }
+        try:
+            response = requests.post(
+                LITELLM_DIRECT_CHAT_ENDPOINT,
+                json=payload,
+                headers=headers,
+                timeout=30
+            )
+            response.raise_for_status()  # Raises an exception for 4XX/5XX status codes
+            assert "choices" in response.json(), "Response missing 'choices'"
+            print("LiteLLM direct access with correct auth successful.")
+            # You can add more assertions here, e.g., checking the content of the response
+            # print(f"Response: {response.json()}")
+        except requests.exceptions.RequestException as e:
+            # If litellm-proxy is not running on port 4000, this might be a ConnectionError
+            pytest.fail(f"Request to LiteLLM proxy failed: {e}")
+
+    def test_litellm_direct_no_auth(self):
+        """Test accessing LiteLLM proxy directly without authentication."""
+        print(f"Testing LiteLLM direct access with NO auth: {LITELLM_DIRECT_CHAT_ENDPOINT}")
+        payload = {
+            "model": TEST_MODEL_NAME,
+            "messages": [{"role": "user", "content": "Test no auth."}],
+            "max_tokens": 5
+        }
+        headers = {"Content-Type": "application/json"} # No Authorization header
+        try:
+            response = requests.post(
+                LITELLM_DIRECT_CHAT_ENDPOINT,
+                json=payload,
+                headers=headers,
+                timeout=10
+            )
+            # LiteLLM proxy typically returns 401 Unauthorized if master_key is set and not provided
+            assert response.status_code == 401, f"Expected HTTP 401 Unauthorized, got {response.status_code}. Response: {response.text}"
+            print("LiteLLM direct access without auth correctly failed with HTTP 401.")
+        except requests.exceptions.RequestException as e:
+            pytest.fail(f"Unexpected exception with no auth: {e}")
+
+    def test_litellm_direct_incorrect_auth(self):
+        """Test accessing LiteLLM proxy directly with incorrect authentication."""
+        print(f"Testing LiteLLM direct access with INCORRECT auth: {LITELLM_DIRECT_CHAT_ENDPOINT}")
+        payload = {
+            "model": TEST_MODEL_NAME,
+            "messages": [{"role": "user", "content": "Test incorrect auth."}],
+            "max_tokens": 5
+        }
+        headers = {
+            "Content-Type": "application/json",
+            "Authorization": "Bearer wrong-key" # Incorrect key
+        }
+        try:
+            response = requests.post(
+                LITELLM_DIRECT_CHAT_ENDPOINT,
+                json=payload,
+                headers=headers,
+                timeout=10
+            )
+            assert response.status_code == 401, f"Expected HTTP 401 Unauthorized, got {response.status_code}. Response: {response.text}"
+            print("LiteLLM direct access with incorrect auth correctly failed with HTTP 401.")
+        except requests.exceptions.RequestException as e:
+            pytest.fail(f"Unexpected exception with incorrect auth: {e}")
+
+# --- Requests-based mTLS Tests ---
+@pytest.mark.usefixtures("regenerate_certificates_and_restart_nginx")
+class TestMTLSWithRequests:
+    def test_ollama_via_mtls_proxy_correct_cert_requests(self):
+        """Test 3a: (Requests) Access Ollama via mTLS proxy with correct client certificate.""" # [cite: 25]
+        print(f"Testing (Requests) Ollama via mTLS proxy with correct cert: {LITELLM_CHAT_ENDPOINT}")
+        payload = {"model": TEST_MODEL_NAME, "messages": [{"role": "user", "content": "Capital of France?"}], "max_tokens": 5}
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
+        try:
+            response = requests.post(
+                LITELLM_CHAT_ENDPOINT, json=payload, headers=headers,
+                cert=(str(CLIENT_CERT_PATH), str(CLIENT_KEY_PATH)), # [cite: 26]
+                verify=str(CA_CERT_PATH), timeout=30
+            )
+            response.raise_for_status()
+            assert "choices" in response.json(), "Response missing 'choices'"
+            print("(Requests) mTLS access with correct cert successful.")
+        except requests.exceptions.SSLError as e:
+            pytest.fail(f"(Requests) SSL error with correct certs: {e}. Nginx logs: 'docker-compose logs nginx-mtls-proxy'") # [cite: 27, 28]
+        except requests.exceptions.RequestException as e:
+            pytest.fail(f"(Requests) Request failed with correct certs: {e}")
+
+    def test_ollama_via_mtls_proxy_no_client_cert_requests(self):
+        """Test 4a: (Requests) Attempt mTLS proxy WITHOUT client certificate."""
+        print(f"Testing (Requests) Ollama via mTLS proxy with NO client cert: {LITELLM_CHAT_ENDPOINT}")
+        payload = {"model": TEST_MODEL_NAME, "messages": [{"role": "user", "content": "Test no client cert."}], "max_tokens": 5}
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LITELLM_MASTER_KEY}"} # [cite: 29]
+        try:
+            response = requests.post(LITELLM_CHAT_ENDPOINT, json=payload, headers=headers, verify=str(CA_CERT_PATH), timeout=10)
+            assert response.status_code == 400, f"Expected HTTP 400, got {response.status_code}. Response: {response.text}" # [cite: 30]
+            print("(Requests) mTLS access without client cert correctly failed with HTTP 400.")
+        except requests.exceptions.SSLError:
+            print("(Requests) mTLS access without client cert correctly failed with SSLError.")
+            assert True
+        except requests.exceptions.RequestException as e:
+            pytest.fail(f"(Requests) Unexpected exception with no client cert: {e}")
+
+    def test_ollama_via_mtls_proxy_server_not_trusted_by_client_requests(self): # [cite: 31]
+        """Test 5a: (Requests) Attempt mTLS proxy when client uses default CAs (server should not be trusted)."""
+        print(f"Testing (Requests) mTLS proxy with client cert, client NOT trusting server's custom CA: {LITELLM_CHAT_ENDPOINT}")
+        payload = {"model": TEST_MODEL_NAME, "messages": [{"role": "user", "content": "Test server not trusted."}], "max_tokens": 5}
+        headers = {"Content-Type": "application/json", "Authorization": f"Bearer {LITELLM_MASTER_KEY}"}
+        with pytest.raises(requests.exceptions.SSLError) as excinfo:
+            requests.post( # [cite: 32]
+                LITELLM_CHAT_ENDPOINT, json=payload, headers=headers,
+                cert=(str(CLIENT_CERT_PATH), str(CLIENT_KEY_PATH)),
+                verify=True, timeout=10 # verify=True uses system CAs
+            )
+        print(f"(Requests) mTLS with untrusted server CA correctly failed: {excinfo.value}")
+        assert "certificate verify failed" in str(excinfo.value).lower()
+
+# --- Curl-based mTLS Tests --- # [cite: 33]
+@pytest.mark.usefixtures("regenerate_certificates_and_restart_nginx")
+class TestMTLSWithCurl:
+    def test_ollama_via_mtls_proxy_correct_cert_curl(self):
+        """Test 3b: (curl) Access Ollama via mTLS proxy with correct client certificate."""
+        print(f"Testing (curl) Ollama via mTLS proxy with correct cert: {LITELLM_CHAT_ENDPOINT}")
+        payload = json.dumps({"model": TEST_MODEL_NAME, "messages": [{"role": "user", "content": "Capital of France using curl?"}], "max_tokens": 5})
+        curl_command = [
+            "curl", "-s", "-X", "POST", LITELLM_CHAT_ENDPOINT,
+            "--cert", str(CLIENT_CERT_PATH), # [cite: 34]
+            "--key", str(CLIENT_KEY_PATH),
+            "--cacert", str(CA_CERT_PATH),
+            "-H", "Content-Type: application/json",
+            "-H", f"Authorization: Bearer {LITELLM_MASTER_KEY}",
+            "-d", payload
+        ]
+        process = run_command(curl_command, check=False) # Don't fail test immediately
+        assert process.returncode == 0, f"curl command failed with exit code {process.returncode}. Stderr: {process.stderr}" # [cite: 35, 36]
+        try:
+            response_data = json.loads(process.stdout)
+            assert "choices" in response_data, f"curl response missing 'choices'. Output: {process.stdout}" # [cite: 37]
+            print("(curl) mTLS access with correct cert successful.")
+        except json.JSONDecodeError:
+            pytest.fail(f"curl output was not valid JSON: {process.stdout}")
+
+    def test_ollama_via_mtls_proxy_no_client_cert_curl(self):
+        """Test 4b: (curl) Attempt mTLS proxy WITHOUT client certificate."""
+        print(f"Testing (curl) Ollama via mTLS proxy with NO client cert: {LITELLM_CHAT_ENDPOINT}")
+        payload = json.dumps({"model": TEST_MODEL_NAME, "messages": [{"role": "user", "content": "Test no client cert curl."}], "max_tokens": 5}) # [cite: 38]
+        curl_command = [ # [cite: 39]
+            "curl", "-s", "-X", "POST", LITELLM_CHAT_ENDPOINT,
+            # No --cert or --key
+            "--cacert", str(CA_CERT_PATH), # Still try to verify server if connection is made
+            "-H", "Content-Type: application/json",
+            "-H", f"Authorization: Bearer {LITELLM_MASTER_KEY}",
+            "-d", payload, # [cite: 40]
+            "--fail-with-body" # Makes curl exit with 22 on 4xx/5xx errors, easier to check
+        ]
+        process = run_command(curl_command, check=False) # Don't fail test immediately
+
+        if process.returncode != 0: # [cite: 41]
+            print(f"(curl) mTLS access without client cert correctly failed with exit code {process.returncode}. Stderr: {process.stderr}") # [cite: 42]
+            assert process.returncode in [22, 35, 56, 60], f"Expected curl to fail (e.g. exit 22, 35, 56, 60), got {process.returncode}"
+        else:
+            pytest.fail(f"(curl) mTLS access without client cert unexpectedly succeeded (exit 0). Output: {process.stdout}") # [cite: 43]
+
+    def test_ollama_via_mtls_proxy_server_not_trusted_by_client_curl(self):
+        """Test 5b: (curl) Attempt mTLS proxy when client uses default CAs (server should not be trusted).""" # [cite: 44]
+        print(f"Testing (curl) mTLS proxy with client cert, client NOT trusting server's custom CA: {LITELLM_CHAT_ENDPOINT}")
+        payload = json.dumps({"model": TEST_MODEL_NAME, "messages": [{"role": "user", "content": "Test server not trusted curl."}], "max_tokens": 5})
+        curl_command = [
+            "curl", "-s", "-X", "POST", LITELLM_CHAT_ENDPOINT,
+            "--cert", str(CLIENT_CERT_PATH),
+            "--key", str(CLIENT_KEY_PATH),
+            # NO --cacert str(CA_CERT_PATH) means curl uses its default CA bundle # [cite: 45]
+            "-H", "Content-Type: application/json",
+            "-H", f"Authorization: Bearer {LITELLM_MASTER_KEY}",
+            "-d", payload
+        ]
+        process = run_command(curl_command, check=False)
+        assert process.returncode == 60, \
+            f"(curl) Expected SSL verification failure (exit code 60), got {process.returncode}. Stderr: {process.stderr}, Stdout: {process.stdout}" # [cite: 46]
+        print(f"(curl) mTLS with untrusted server CA correctly failed with exit code {process.returncode}.")
+</file>
+
+<file path=".gitignore">
+.idea
+certs/*
+.idea-old
+.venv-old
+**/__pycache__/
+.env
+</file>
+
+<file path="docker-compose.yml">
+# docker-compose.yml
+version: '3.8'
+
+services:
+  cert-generator:
+    build: ./cert-generator
+    container_name: local_cert_generator
+    volumes:
+      # Mounts the local ./certs directory to /certs_output inside the container
+      # The generate_certs.sh script will copy the generated certs here.
+      - ./certs:/certs_output # Output directory for generated certs
+    environment:
+     - FORCE_REGENERATE=true # Uncomment to force regeneration
+
+  nginx-mtls-proxy:
+    image: nginx:alpine
+    container_name: local_mtls_proxy
+    ports:
+      - "8443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./certs:/etc/nginx/certs:ro # Nginx uses certs from here
+    networks:
+      - mtls-test-net
+    depends_on:
+      - litellm-proxy
+
+  litellm-proxy:
+    image: ghcr.io/berriai/litellm:main-latest # Consider pinning to a specific stable version later
+    container_name: local_litellm_proxy
+    expose:
+      - "4000"
+    ports:
+      - "4000:4000"
+    volumes:
+      - ./litellm_proxy/config.yaml:/app/config.yaml:ro
+    command: [ "--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0" ]
+    networks:
+      - mtls-test-net
+    depends_on:
+      - ollama # LiteLLM waits for Ollama
+    environment: # <-- Add this section
+      - LITELLM_MASTER_KEY=sk-1234
+
+  ollama:
+    build: ./ollama # Build from the custom Ollama Dockerfile
+    container_name: local_ollama
+    expose:
+      - "11434"
+    ports:
+      - "11434:11434"
+    networks:
+      - mtls-test-net
+    environment:
+      - OLLAMA_PULL_MODEL=qwen3:0.6b # Specify model here, used by entrypoint.sh
+      # Set OLLAMA_MODELS to the path where models will be stored inside the container.
+      # This should match the volume mount path.
+      - OLLAMA_MODELS=/root/.ollama/models
+    volumes:
+      # Mount the named volume 'ollama_models_cache' to /root/.ollama inside the container.
+      # This directory is where Ollama stores its models by default.
+      - ollama_models_cache:/root/.ollama
+    # deploy: # Optional GPU support
+    #   resources:
+    #     reservations:
+    #       devices:
+    #         - driver: nvidia
+    #           count: 1
+    #           capabilities: [gpu]
+
+networks:
+  mtls-test-net:
+    driver: bridge
+
+# Define the named volume for caching Ollama models
+volumes:
+  ollama_models_cache:
+    driver: local # Specifies the local driver, which is the default
+</file>
+
+<file path="imports.py">
+from litellm import completion, acompletion
+from litellm.llms.azure.azure import AzureChatCompletion
+from litellm.llms.base import BaseLLM
+from litellm.llms.custom_httpx.http_handler import AsyncHTTPHandler, HTTPHandler
+from litellm.types.utils import GenericStreamingChunk, ImageResponse, ModelResponse
+from openai import OpenAI, AzureOpenAI
+</file>
+
+<file path="README.md">
+# Local mTLS Testing Environment for LLM Services
+
+This setup uses Docker Compose to create a local environment with:
+1. An Nginx reverse proxy enforcing mTLS.
+2. An Ollama service running a local LLM (e.g., `qwen2:0.5b` by default).
+3. A LiteLLM Proxy service routing requests to Ollama.
+4. A utility container to generate self-signed mTLS certificates.
+
+This allows testing of clients (like a custom LiteLLM provider) that need to communicate with a backend service requiring mTLS.
+
+## Prerequisites
+
+- Docker
+- Docker Compose
+- `curl` (for testing)
+
+## Setup and Usage
+
+### 1. Generate mTLS Certificates (One-time or if certs expire/change)
+
+The `cert-generator` service in `docker-compose.yml` is responsible for this. The generated certificates will be placed in the `./certs` directory on your host machine.
+
+**To generate certificates:**
+
+a. Ensure the `./certs` directory exists in your `local-mtls-test` project root. If not, create it:
+   ```bash
+   mkdir -p certs
+   ```
+
+b. Run the certificate generator service. This command will build the `cert-generator` image if it doesn't exist and then run it. The container will exit after generating the certs.
+   ```bash
+   docker-compose up cert-generator
+   ```
+
+   This will execute the `generate_certs.sh` script inside the container, creating:
+   - `ca.crt`, `ca.key` (Certificate Authority)
+   - `server.crt`, `server.key` (for the Nginx mTLS proxy)
+   - `client.crt`, `client.key` (for your test client/application)
+
+   These files will be copied to your local `./certs` directory.
+
+c. **To force regeneration** (e.g., if you change subject names or want new certs):
+   You can either:
+   - Delete the contents of your local `./certs` directory and re-run `docker-compose up cert-generator`.
+   - Or, uncomment the `FORCE_REGENERATE=true` environment variable in the `cert-generator` service definition within `docker-compose.yml` and then run `docker-compose up cert-generator`. Remember to comment it out again afterward if you don't want to force regeneration every time.
+
+### 2. Start the Main Services
+
+Once certificates are generated and present in the `./certs` directory, start the Nginx, LiteLLM Proxy, and Ollama services:
+
+```bash
+docker-compose up -d nginx-mtls-proxy litellm-proxy ollama
+```
+
+The ollama service will automatically pull the model specified by OLLAMA_PULL_MODEL in docker-compose.yml (default: qwen2:0.5b) on its first startup after a fresh build or if the model isn't cached. This might take a few minutes.
+
+Check logs to ensure services start correctly:
+```bash
+docker-compose logs -f
+```
+
+Look for Uvicorn running on http://0.0.0.0:4000 from local_litellm_proxy and messages indicating Ollama has pulled the model and is listening from local_ollama. Nginx logs (local_mtls_proxy) should show it's ready.
+
+### 3. Test mTLS Endpoint with curl
+
+The Nginx mTLS proxy listens on https://localhost:8443. The LiteLLM Proxy uses ollama-qwen-local as the model name for the qwen2:0.5b model (or whatever model is configured in litellm_proxy/config.yaml and pulled by Ollama).
+
+**Important**: Run these curl commands from your host machine, in the local-mtls-test directory (so the relative paths to certs/ are correct).
+
+a) Test WITH Valid Client Certificate (Successful Case):
+This command tells curl to use the client certificate and key, and to trust your custom CA for validating the server's certificate.
+
+```bash
+curl -X POST https://localhost:8443/chat/completions \
+  --cert certs/client.crt \
+  --key certs/client.key \
+  --cacert certs/ca.crt \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-1234" \
+  -d '{
+    "model": "ollama-qwen-local",
+    "messages": [{"role": "user", "content": "Briefly, what is the capital of France?"}]
+  }'
+```
+
+Expected Output: A JSON response from the Ollama model (e.g., {"... "content": "Paris is the capital of France." ...}).
+
+b) Test WITHOUT Client Certificate (mTLS Failure Case):
+Nginx is configured to require a client certificate (ssl_verify_client on), so it should reject the TLS handshake or return an error. Adding -v gives verbose output.
+
+```bash
+curl -X POST https://localhost:8443/chat/completions \
+  --cacert certs/ca.crt \
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-1234" \
+  -d '{
+    "model": "ollama-qwen-local",
+    "messages": [{"role": "user", "content": "Test no client cert."}]
+  }' \
+  -v
+```
+
+**Expected Output:** A TLS handshake failure. Look for messages like:
+- `* OpenSSL SSL_connect: SSL_ERROR_SYSCALL in connection to localhost:8443`
+- `* schannel: failed to decrypt data, data not available`
+- `* NSS: client certificate not found (nickname not specified)`
+- `curl: (35) ... ssl handshake failure`
+
+Or, Nginx might return an HTTP 400 error: `<html><head><title>400 No required SSL certificate was sent</title></head>...</html>`.
+
+c) Test WITH Client Certificate but Server Cert Not Trusted by Client (TLS Failure Case):
+This simulates if your client doesn't trust the CA that signed the Nginx server's certificate. We achieve this by *not* providing `--cacert` to `curl`.
+
+```bash
+curl -X POST https://localhost:8443/chat/completions \
+  --cert certs/client.crt \
+  --key certs/client.key \
+  # --cacert certs/ca.crt  <-- CA certificate is NOT provided to curl
+  -H "Content-Type: application/json" \
+  -H "Authorization: Bearer sk-1234" \
+  -d '{
+    "model": "ollama-qwen-local",
+    "messages": [{"role": "user", "content": "Test server trust fail."}]
+  }' \
+  -v
+```
+
+Expected Output: A certificate verification error from curl because it cannot verify the Nginx server's certificate against its known CAs (since our custom CA isn't in the system's default trust store).
+* SSL certificate problem: self-signed certificate in certificate chain (or similar, as our CA is self-signed and not known to curl without --cacert)
+* curl: (60) SSL certificate problem...
+
+### 4. Configure Your Main Python Application (for mTLS Provider Testing)
+
+To test your application's AzureAPIMMTLSProvider against this local setup:
+
+Environment Variables for your Python App:
+Set these where your Python application runs (e.g., in your .env file for the main project, adjusting the paths as necessary if your main app is not in the same parent directory as local-mtls-test):
+
+```
+# Example if local-mtls-test is a sibling to your app's root
+# AZURE_APIM_MTLS_CERT_PATH=../local-mtls-test/certs/client.crt
+# AZURE_APIM_MTLS_KEY_PATH=../local-mtls-test/certs/client.key
+
+# Or, if your main app is at /path/to/main-app and local-mtls-test is at /path/to/local-mtls-test
+# AZURE_APIM_MTLS_CERT_PATH=/path/to/local-mtls-test/certs/client.crt
+# AZURE_APIM_MTLS_KEY_PATH=/path/to/local-mtls-test/certs/client.key
+
+# For simplicity during initial testing, you can use absolute paths:
+# AZURE_APIM_MTLS_CERT_PATH=/full/path/to/your/local-mtls-test/certs/client.crt
+# AZURE_APIM_MTLS_KEY_PATH=/full/path/to/your/local-mtls-test/certs/client.key
+```
+
+**Important**: Ensure these paths are resolvable from the directory where your Python application process is running.
+
+llm_providers.json in your Python App:
+Configure the provider to point to the local Nginx mTLS proxy. The provider_type must match CUSTOM_PROVIDER_NAME from custom_llm_providers.py.
+
+```json
+{
+  // ... other providers ...
+  "test-local-mtls-ollama": {
+    "display_name": "Local mTLS Ollama (Qwen)",
+    "provider_type": "azure-apim-mtls", // Your custom provider's registered name
+    "deployment_name": "ollama-qwen-local", // Must match model_name in litellm_proxy/config.yaml
+    "api_base": "https://localhost:8443",    // Nginx mTLS endpoint
+    "api_key": "sk-1234", // The master_key for LiteLLM Proxy auth (passed to custom provider)
+    "api_version": "2024-02-01" // Dummy version if your custom provider expects/needs it
+  }
+  // ...
+}
+```
+
+Run your Python application. When you make a request using the test-local-mtls-ollama model key, your AzureAPIMMTLSProvider should handle the mTLS connection to https://localhost:8443.
+
+### 5. Stopping the Services
+
+When you're done testing:
+```bash
+docker-compose down
+```
+
+This stops and removes the containers. The `./certs` directory (and its contents) will persist on your host machine.
+
+To also remove the Docker network if it's not needed by other Compose projects:
+```bash
+docker-compose down --remove-orphans
+```
+
+## Additional Notes
+
+This environment provides a way to locally test mTLS interactions. The AzureAPIMMTLSProvider's SSL context is configured to load default CAs for server certificate verification, which works for publicly trusted CAs. For this local setup with a self-signed CA, your client application (Python with httpx) would typically need to be configured to trust certs/ca.crt if it were verifying the server cert itself directly. However, the httpx.Client(verify=ssl_context) where ssl_context only has load_cert_chain (client cert) and load_default_certs relies on those default CAs. If localhost's cert isn't signed by one of those, you might need to adjust the client's ssl_context to also trust your custom ca.crt for the server verification part, or use verify=path/to/your/ca.crt in httpx.Client. The curl example explicitly uses --cacert for this reason.
+
+For the AzureAPIMMTLSProvider, the ssl.create_default_context(ssl.Purpose.SERVER_AUTH) combined with ssl_context.load_default_certs() should be sufficient if the server (Nginx) presents a cert verifiable by standard CAs. For our local Nginx using a custom CA, the httpx.Client(verify=ssl_context) in the custom provider will need that ssl_context to also trust our ca.crt. Let's ensure the custom provider's _create_ssl_context does this.
+
+Refinement for AzureAPIMMTLSProvider._create_ssl_context (in your main app's custom_llm_providers.py) to trust the local CA:
+If you encounter SSL verification errors when your Python app connects to https://localhost:8443 (because localhost's cert is signed by your custom CA which isn't in the default trust store), you'll need to tell httpx to trust your CA for server certificate validation.
+
+In app/core/custom_llm_providers.py (your main application, not the test setup):
+
+```python
+# In AzureAPIMMTLSProvider, method _create_ssl_context:
+# ...
+    def _create_ssl_context(self) -> ssl.SSLContext:
+        try:
+            # For SERVER_AUTH, we need to specify the CA that signed the SERVER's cert
+            # if it's not a publicly trusted one.
+            # For this local test, our server (Nginx) uses a cert signed by our ca.crt
+            # So, we need to load ca.crt for server verification.
+            ca_for_server_verification_path = os.path.join(
+                os.path.dirname(self.cert_path), # Assuming ca.crt is in the same dir as client.crt
+                "ca.crt" # Or get this path from another env var / config
+            )
+            if not os.path.exists(ca_for_server_verification_path):
+                logger.warning(f"CA certificate for server verification not found at {ca_for_server_verification_path}. SSL/TLS server verification might fail if server uses a custom CA.")
+                # Fallback to default CAs only if our specific one isn't found
+                ssl_context = ssl.create_default_context(ssl.Purpose.SERVER_AUTH)
+                ssl_context.load_default_certs()
+            else:
+                logger.info(f"Loading custom CA for server verification: {ca_for_server_verification_path}")
+                ssl_context = ssl.create_default_context(
+                    ssl.Purpose.SERVER_AUTH,
+                    cafile=ca_for_server_verification_path
+                )
+
+            ssl_context.load_cert_chain(certfile=self.cert_path, keyfile=self.key_path) # Client cert
+            ssl_context.check_hostname = True
+            ssl_context.verify_mode = ssl.CERT_REQUIRED # Verify server's cert
+            return ssl_context
+        # ... (rest of the error handling)
+# ...
+```
+
+This refinement to _create_ssl_context in your actual application's custom provider will be important when testing against the local Nginx server that uses a certificate signed by your custom ca.crt. You'd also need to ensure ca.crt is available to your main application (e.g., copy it from local-mtls-test/certs/ to a location your app can access).
+</file>
+
+<file path="repomix.sh">
+repomix -o project_contents.txt -i .jj,.venv
+</file>
+
+<file path="requirements.txt">
+pytest
+requests
+litellm
+openai
+python-dotenv
+</file>
+
+</files>

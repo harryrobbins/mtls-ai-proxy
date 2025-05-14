@@ -1,0 +1,23 @@
+# cert-generator/openssl_ca.cnf
+
+[ req ]
+distinguished_name = req_distinguished_name
+x509_extensions    = v3_ca  # The extensions to add to the self-signed cert
+prompt             = no     # Don't prompt for DN, use subj from command line
+
+[ req_distinguished_name ]
+# Subject details are provided via -subj on the command line
+# For example:
+# C            = XX
+# ST           = Testland
+# L            = TestCity
+# O            = LocalTestOrg
+# OU           = DevOps
+# CN           = LocalTestCA
+
+[ v3_ca ]
+# Extensions for a typical CA
+subjectKeyIdentifier   = hash
+authorityKeyIdentifier = keyid:always,issuer
+basicConstraints       = critical, CA:TRUE
+keyUsage               = critical, digitalSignature, cRLSign, keyCertSign

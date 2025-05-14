@@ -9,8 +9,8 @@ services:
       # Mounts the local ./certs directory to /certs_output inside the container
       # The generate_certs.sh script will copy the generated certs here.
       - ./certs:/certs_output # Output directory for generated certs
-    # environment:
-      # - FORCE_REGENERATE=true # Uncomment to force regeneration
+    environment:
+     - FORCE_REGENERATE=true # Uncomment to force regeneration
 
   nginx-mtls-proxy:
     image: nginx:alpine
@@ -26,17 +26,21 @@ services:
       - litellm-proxy
 
   litellm-proxy:
-    image: ghcr.io/berriai/litellm:main-latest
+    image: ghcr.io/berriai/litellm:main-latest # Consider pinning to a specific stable version later
     container_name: local_litellm_proxy
     expose:
       - "4000"
+    ports:
+      - "4000:4000"
     volumes:
       - ./litellm_proxy/config.yaml:/app/config.yaml:ro
-    command: ["--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0"]
+    command: [ "--config", "/app/config.yaml", "--port", "4000", "--host", "0.0.0.0" ]
     networks:
       - mtls-test-net
     depends_on:
       - ollama # LiteLLM waits for Ollama
+    environment: # <-- Add this section
+      - LITELLM_MASTER_KEY=sk-1234
 
   ollama:
     build: ./ollama # Build from the custom Ollama Dockerfile
