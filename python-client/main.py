@@ -3,6 +3,8 @@ import os
 import litellm
 from litellm import CustomLLM, completion, get_llm_provider, acompletion
 import asyncio
+from dotenv import load_dotenv
+load_dotenv()
 
 base_model = os.getenv("BASE_MODEL")
 ollama_model = "ollama/" + base_model
