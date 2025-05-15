@@ -49,7 +49,7 @@ class OllamaProxyLLM(CustomLLM):
     async def acompletion(self, *args, **kwargs) -> litellm.ModelResponse:
         return litellm.completion(
             model=ollama_model,
-            messages=[{"role": "user", "content": "say 'i am synchronous'"}],
+            messages=[{"role": "user", "content": "say 'i am asynchronous'"}],
             max_tokens=50
         )  # type: ignore
 

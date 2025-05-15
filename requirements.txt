@@ -5,3 +5,4 @@ openai
 python-dotenv
 pytest-asyncio
 httpx
+httpx[http2]
