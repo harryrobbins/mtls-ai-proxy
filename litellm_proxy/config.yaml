@@ -1,9 +1,14 @@
 # litellm_proxy/config.yaml
 model_list:
-  - model_name: ollama-qwen-local # Name for accessing this model via the proxy
+  - model_name: ollama-qwen3 # Name for accessing this model via the proxy
     litellm_params:
       model: ollama/qwen3:0.6b # Tells LiteLLM to use Ollama provider + specific model tag
-      api_base: http://ollama:11434 # Internal docker network address for Ollama service
+      api_base: http://ollama-qwen3:11434 # Internal docker network address for Ollama service
+      # No api_key needed for local Ollama
+  - model_name: ollama-qwen2 # Name for accessing this model via the proxy
+    litellm_params:
+      model: ollama/qwen2:0.5b # Tells LiteLLM to use Ollama provider + specific model tag
+      api_base: http://ollama-qwen2:11434 # Internal docker network address for Ollama service
       # No api_key needed for local Ollama
 
 litellm_settings:

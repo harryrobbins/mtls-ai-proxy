@@ -38,13 +38,14 @@ services:
     networks:
       - mtls-test-net
     depends_on:
-      - ollama # LiteLLM waits for Ollama
+      - ollama-qwen3 # LiteLLM waits for Ollama
+      - ollama-qwen2
     environment: # <-- Add this section
       - LITELLM_MASTER_KEY=sk-1234
 
-  ollama:
+  ollama-qwen3:
     build: ./ollama # Build from the custom Ollama Dockerfile
-    container_name: local_ollama
+    container_name: local_ollama_qwen3
     expose:
       - "11434"
     ports:
@@ -59,7 +60,25 @@ services:
     volumes:
       # Mount the named volume 'ollama_models_cache' to /root/.ollama inside the container.
       # This directory is where Ollama stores its models by default.
-      - ollama_models_cache:/root/.ollama
+      - qwen3_cache:/root/.ollama
+  ollama-qwen2:
+    build: ./ollama # Build from the custom Ollama Dockerfile
+    container_name: local_ollama_quen2
+    expose:
+      - "11434"
+    ports:
+      - "11435:11434"
+    networks:
+      - mtls-test-net
+    environment:
+      - OLLAMA_PULL_MODEL=qwen2:0.5b # Specify model here, used by entrypoint.sh
+      # Set OLLAMA_MODELS to the path where models will be stored inside the container.
+      # This should match the volume mount path.
+      - OLLAMA_MODELS=/root/.ollama/models
+    volumes:
+      # Mount the named volume 'ollama_models_cache' to /root/.ollama inside the container.
+      # This directory is where Ollama stores its models by default.
+      - qwen2_cache:/root/.ollama
     # deploy: # Optional GPU support
     #   resources:
     #     reservations:
@@ -74,5 +93,7 @@ networks:
 
 # Define the named volume for caching Ollama models
 volumes:
-  ollama_models_cache:
+  qwen3_cache:
     driver: local # Specifies the local driver, which is the default
+  qwen2_cache:
+    driver: local

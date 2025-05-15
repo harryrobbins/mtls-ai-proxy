@@ -27,31 +27,6 @@ except ImportError:
     print("It should contain the function: convert_openai_chat_completion_to_litellm_model_response")
     exit(1)
 
-# --- Certificate Paths ---
-current_file_dir = Path(__file__).parent
-certs_dir = current_file_dir.parent / "certs"
-CERTIFICATE_PATH = certs_dir / "client.crt"
-KEY_PATH = certs_dir / "client.key"
-CA_PATH = certs_dir / "ca.crt"
-
-# --- Validate Certificate Paths ---
-for path_to_check in (CERTIFICATE_PATH, KEY_PATH, CA_PATH):
-    if not path_to_check.exists():
-        print(f"Error: Could not find certificate file {path_to_check}")
-        print(f"Current file directory: {current_file_dir}")
-        print(f"Calculated certs directory: {certs_dir}")
-        exit(1)
-    else:
-        print(f"Found certificate file: {path_to_check}")
-
-# --- Load Environment Variables ---
-load_dotenv()
-
-# --- Configuration ---
-UPSTREAM_MODEL_NAME = "ollama-qwen-local"
-LITELLM_PROXY_KEY = "sk-1234"
-MTLS_PROXY_URL = "https://localhost:8443"
-
 
 class MTLSOpenAILLM(CustomLLM):
     """
@@ -60,11 +35,32 @@ class MTLSOpenAILLM(CustomLLM):
     2. Implements "fake streaming" by making a non-streaming call and returning the response
        as a single content chunk followed by a finalization chunk, using GenericStreamingChunk.
     """
+    client_cert_path: str
+    client_key_path: str
+    ca_cert_path: str
+
+    def __init__(self, client_cert_path,
+                 client_key_path,
+                 ca_cert_path, **kwargs):
+        self.client_cert_path = client_cert_path
+        self.client_key_path = client_key_path
+        self.ca_cert_path = ca_cert_path
+        # --- Validate Certificate Paths ---
+        for path_to_check in (self.client_cert_path, self.client_key_path, self.ca_cert_path):
+            if not Path(path_to_check).exists():
+                print(f"Error: Could not find certificate file {path_to_check}")
+                print(f"Current file directory: {current_file_dir}")
+                print(f"Calculated certs directory: {certs_dir}")
+                exit(1)
+            else:
+                print(f"Found cryptography file: {path_to_check}")
+        super().__init__()
+
 
     def _get_client(self, asynchronous: bool = False):
         try:
-            ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=str(CA_PATH))
-            ctx.load_cert_chain(certfile=str(CERTIFICATE_PATH), keyfile=str(KEY_PATH))
+            ctx = ssl.create_default_context(ssl.Purpose.SERVER_AUTH, cafile=str(self.ca_cert_path))
+            ctx.load_cert_chain(certfile=str(self.client_cert_path), keyfile=str(self.client_key_path))
         except Exception as e:
             raise RuntimeError(f"Failed to create SSL context: {e}")
 
@@ -89,20 +85,20 @@ class MTLSOpenAILLM(CustomLLM):
         messages = kwargs.get("messages")
         local_kwargs = kwargs.copy()
         local_kwargs.pop("stream", None)
-
+        upstream_model_name = local_kwargs.get("model")
         sync_openai_client = self._get_client(asynchronous=False)
         try:
             upstream_response: ChatCompletion = sync_openai_client.chat.completions.create(
-                model=UPSTREAM_MODEL_NAME,
+                model=upstream_model_name,
                 messages=messages,
                 max_tokens=local_kwargs.get("max_tokens", 150),
                 temperature=local_kwargs.get("temperature", 0.7),
             )
         except httpx.ReadTimeout as e:
-            raise litellm.Timeout(message=f"MTLS Upstream ReadTimeout: {str(e)}", model=UPSTREAM_MODEL_NAME,
+            raise litellm.Timeout(message=f"MTLS Upstream ReadTimeout: {str(e)}", model=upstream_model_name,
                                   llm_provider="custom_mtls_provider")
         except Exception as e:
-            raise litellm.APIConnectionError(f"MTLS Upstream Error: {str(e)}", model=UPSTREAM_MODEL_NAME,
+            raise litellm.APIConnectionError(f"MTLS Upstream Error: {str(e)}", model=upstream_model_name,
                                              llm_provider="custom_mtls_provider")
 
         litellm_response = convert_openai_chat_completion_to_litellm_model_response(
@@ -114,13 +110,13 @@ class MTLSOpenAILLM(CustomLLM):
             completion_tokens = 0
             if messages:
                 try:  # Wrap token_counter in try-except as it can sometimes fail with custom/uncommon models
-                    prompt_tokens = litellm.token_counter(model=UPSTREAM_MODEL_NAME, messages=messages)
+                    prompt_tokens = litellm.token_counter(model=upstream_model_name, messages=messages)
                 except:
                     prompt_tokens = 0  # Fallback
             if litellm_response.choices and litellm_response.choices[0].message and litellm_response.choices[
                 0].message.content:
                 try:
-                    completion_tokens = litellm.token_counter(model=UPSTREAM_MODEL_NAME,
+                    completion_tokens = litellm.token_counter(model=upstream_model_name,
                                                               text=litellm_response.choices[0].message.content)
                 except:
                     completion_tokens = 0  # Fallback
@@ -133,20 +129,21 @@ class MTLSOpenAILLM(CustomLLM):
         messages = kwargs.get("messages")
         local_kwargs = kwargs.copy()
         local_kwargs.pop("stream", None)
+        upstream_model_name = local_kwargs.get("model")
 
         async_openai_client = self._get_client(asynchronous=True)
         try:
             upstream_response: ChatCompletion = await async_openai_client.chat.completions.create(
-                model=UPSTREAM_MODEL_NAME,
+                model=upstream_model_name,
                 messages=messages,
                 max_tokens=local_kwargs.get("max_tokens", 150),
                 temperature=local_kwargs.get("temperature", 0.7),
             )
         except httpx.ReadTimeout as e:
-            raise litellm.Timeout(message=f"MTLS Upstream ReadTimeout: {str(e)}", model=UPSTREAM_MODEL_NAME,
+            raise litellm.Timeout(message=f"MTLS Upstream ReadTimeout: {str(e)}", model=upstream_model_name,
                                   llm_provider="custom_mtls_provider")
         except Exception as e:
-            raise litellm.APIConnectionError(f"MTLS Upstream Error: {str(e)}", model=UPSTREAM_MODEL_NAME,
+            raise litellm.APIConnectionError(f"MTLS Upstream Error: {str(e)}", model=upstream_model_name,
                                              llm_provider="custom_mtls_provider")
 
         litellm_response = convert_openai_chat_completion_to_litellm_model_response(
@@ -157,13 +154,13 @@ class MTLSOpenAILLM(CustomLLM):
             completion_tokens = 0
             if messages:
                 try:
-                    prompt_tokens = litellm.token_counter(model=UPSTREAM_MODEL_NAME, messages=messages)
+                    prompt_tokens = litellm.token_counter(model=upstream_model_name, messages=messages)
                 except:
                     prompt_tokens = 0
             if litellm_response.choices and litellm_response.choices[0].message and litellm_response.choices[
                 0].message.content:
                 try:
-                    completion_tokens = litellm.token_counter(model=UPSTREAM_MODEL_NAME,
+                    completion_tokens = litellm.token_counter(model=upstream_model_name,
                                                               text=litellm_response.choices[0].message.content)
                 except:
                     completion_tokens = 0
@@ -234,7 +231,7 @@ class MTLSOpenAILLM(CustomLLM):
             usage=None,
             index=0
         )
-        #add debugging
+        # add debugging
         # print(model_response)
         yield GenericStreamingChunk(
             id=_id,
@@ -250,35 +247,52 @@ class MTLSOpenAILLM(CustomLLM):
         )
 
 
-# --- Register the custom LLM provider with LiteLLM ---
-my_mtls_openai_llm = MTLSOpenAILLM()
-
-litellm.custom_provider_map = [
-    {"provider": "mtls_openai_llm", "custom_handler": my_mtls_openai_llm}
-]
-
 # --- Main execution block for testing ---
 if __name__ == "__main__":
-    # litellm.set_verbose = True
+    load_dotenv()
 
-    print("Testing synchronous non-streaming:")
-    try:
-        resp_sync_non_stream = litellm.completion(
-            model="mtls_openai_llm/sync-non-stream",
-            messages=[{"role": "user", "content": "Hello from sync non-stream!"}],
-        )
-        print(f"Response: {resp_sync_non_stream.choices[0].message.content}")
-        print(f"Usage: {resp_sync_non_stream.usage}")
-    except Exception as e:
-        print(f"Error in sync non-streaming: {e}")
-        traceback.print_exc()
-    print("=" * 40)
+    # --- Certificate Paths ---
+    current_file_dir = Path(__file__).parent
+    certs_dir = current_file_dir.parent / "certs"
+    CERTIFICATE_PATH = certs_dir / "client.crt"
+    KEY_PATH = certs_dir / "client.key"
+    CA_PATH = certs_dir / "ca.crt"
+
+    # --- Load Environment Variables ---
+
+    # --- Configuration ---
+    LITELLM_PROXY_KEY = "sk-1234"
+    MTLS_PROXY_URL = "https://localhost:8443"
+    litellm.set_verbose = True
+    MODEL_NAME_1 = "ollama-qwen2"
+    MODEL_NAME_2 = "ollama-qwen3"
+
+    # --- Register the custom LLM provider with LiteLLM ---
+    my_mtls_openai_llm = MTLSOpenAILLM(client_cert_path=CERTIFICATE_PATH, client_key_path=KEY_PATH, ca_cert_path=CA_PATH)
+
+    litellm.custom_provider_map = [
+        {"provider": "mtls_openai_llm", "custom_handler": my_mtls_openai_llm}
+    ]
+
+    for model_name in [MODEL_NAME_1, MODEL_NAME_2]:
+        print(f"Testing synchronous non-streaming with model {model_name}:")
+        try:
+            resp_sync_non_stream = litellm.completion(
+                model=f"mtls_openai_llm/{model_name}",
+                messages=[{"role": "user", "content": "Hello from sync non-stream!"}],
+            )
+            print(f"Response: {resp_sync_non_stream.choices[0].message.content}")
+            print(f"Usage: {resp_sync_non_stream.usage}")
+        except Exception as e:
+            print(f"Error in sync non-streaming: {e}")
+            traceback.print_exc()
+        print("=" * 40)
 
     print("Testing asynchronous non-streaming:")
     try:
         resp_async_non_stream = asyncio.run(
             litellm.acompletion(
-                model="mtls_openai_llm/async-non-stream",
+                model=f"mtls_openai_llm/{MODEL_NAME_1}",
                 messages=[{"role": "user", "content": "Hello from async non-stream!"}],
             )
         )
@@ -292,7 +306,7 @@ if __name__ == "__main__":
     print("Testing synchronous streaming:")
     try:
         response_sync_stream = litellm.completion(
-            model="mtls_openai_llm/sync-stream",
+            model=f"mtls_openai_llm/{MODEL_NAME_1}",
             messages=[{"role": "user", "content": "Hello from sync stream!"}],
             stream=True, max_tokens=5, stream_options={"include_usage": True}
         )
@@ -327,7 +341,7 @@ if __name__ == "__main__":
     async def consume_async_stream():
         try:
             response_async_stream = await litellm.acompletion(
-                model="mtls_openai_llm/async-stream",
+                model=f"mtls_openai_llm/{MODEL_NAME_1}",
                 messages=[{"role": "user", "content": "Hello from async stream!"}],
                 stream=True,
             )
@@ -359,3 +373,110 @@ if __name__ == "__main__":
 
     asyncio.run(consume_async_stream())
     print("=" * 40)
+
+########################################################################################
+
+# base_model = os.getenv("BASE_MODEL")
+# ollama_model = "ollama/" + base_model
+#
+# print("Testing synchronous non-streaming:")
+# try:
+#     resp_sync_non_stream = litellm.completion(
+#         model=ollama_model,
+#         messages=[{"role": "user", "content": "Hello from sync non-stream!"}],
+#         max_tokens=20
+#     )
+#     print(f"Response: {resp_sync_non_stream.choices[0].message.content}")
+#     print(f"Usage: {resp_sync_non_stream.usage}")
+# except Exception as e:
+#     print(f"Error in sync non-streaming: {e}")
+#     traceback.print_exc()
+# print("=" * 40)
+#
+# print("Testing asynchronous non-streaming:")
+# try:
+#     resp_async_non_stream = asyncio.run(
+#         litellm.acompletion(
+#             model=ollama_model,
+#             messages=[{"role": "user", "content": "Hello from async non-stream!"}],
+#         max_tokens=20
+#         )
+#     )
+#     print(f"Response: {resp_async_non_stream.choices[0].message.content}")
+#     print(f"Usage: {resp_async_non_stream.usage}")
+# except Exception as e:
+#     print(f"Error in async non-streaming: {e}")
+#     traceback.print_exc()
+# print("=" * 40)
+#
+# print("Testing synchronous streaming:")
+# try:
+#     response_sync_stream = litellm.completion(
+#         model=ollama_model,
+#         messages=[{"role": "user", "content": "Hello from sync stream!"}],
+#         stream=True, max_tokens=20, stream_options={"include_usage": True}
+#     )
+#     full_response_content_sync = ""
+#     usage_sync = None
+#     print("Iterating over sync stream:")
+#     for chunk_num, chunk in enumerate(response_sync_stream):
+#         content = None
+#         # For ModelResponseStream, content is in choices[0].delta.content
+#         if chunk.choices and chunk.choices[0].delta:
+#             content = chunk.choices[0].delta.content
+#
+#         finish_reason = chunk.choices[0].finish_reason
+#         print(f"  Sync Stream Chunk {chunk_num + 1}: finish_reason='{finish_reason}', content='{content or ''}'")
+#         if content:
+#             full_response_content_sync += content
+#
+#         # Usage is typically on the last chunk or when finish_reason is not None
+#         if hasattr(chunk, 'usage') and chunk.usage is not None:
+#             usage_sync = chunk.usage
+#     print(f"Full Sync Streamed Response: {full_response_content_sync}")
+#     if usage_sync:
+#         print(f"Sync Stream Usage: {usage_sync}")
+# except Exception as e:
+#     print(f"Error in sync streaming: {e}")
+#     traceback.print_exc()
+# print("=" * 40)
+#
+# print("Testing asynchronous streaming:")
+#
+#
+# async def consume_async_stream():
+#     try:
+#         response_async_stream = await litellm.acompletion(
+#             model=ollama_model,
+#             messages=[{"role": "user", "content": "Hello from async stream!"}],
+#             stream=True,
+#         max_tokens=20
+#         )
+#         full_response_content_async = ""
+#         usage_async = None
+#         print("Iterating over async stream:")
+#         chunk_num = 0
+#         async for chunk in response_async_stream:
+#             chunk_num += 1
+#             content = None
+#             # For ModelResponseStream, content is in choices[0].delta.content
+#             if chunk.choices and chunk.choices[0].delta:
+#                 content = chunk.choices[0].delta.content
+#
+#             finish_reason = chunk.choices[0].finish_reason
+#             print(f"  Async Stream Chunk {chunk_num}: finish_reason='{finish_reason}', content='{content or ''}'")
+#             if content:
+#                 full_response_content_async += content
+#
+#             if hasattr(chunk, 'usage') and chunk.usage is not None:
+#                 usage_async = chunk.usage
+#         print(f"Full Async Streamed Response: {full_response_content_async}")
+#         if usage_async:
+#             print(f"Async Stream Usage: {usage_async}")
+#     except Exception as e:
+#         print(f"Error in async streaming: {e}")
+#         traceback.print_exc()
+#
+#
+# asyncio.run(consume_async_stream())
+# print("=" * 40)
