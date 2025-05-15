@@ -87,13 +87,11 @@ class MTLSOpenAILLM(CustomLLM):
 
     def completion(self, *args, **kwargs) -> litellm.ModelResponse:
         messages = kwargs.get("messages")
-        # Make a copy of kwargs to modify, ensuring 'stream' is not passed to the non-streaming call
         local_kwargs = kwargs.copy()
-        local_kwargs.pop("stream", None)  # Explicitly remove stream for this non-streaming method
+        local_kwargs.pop("stream", None)
 
         sync_openai_client = self._get_client(asynchronous=False)
         try:
-            # Use local_kwargs which doesn't have 'stream'
             upstream_response: ChatCompletion = sync_openai_client.chat.completions.create(
                 model=UPSTREAM_MODEL_NAME,
                 messages=messages,
@@ -110,11 +108,22 @@ class MTLSOpenAILLM(CustomLLM):
         litellm_response = convert_openai_chat_completion_to_litellm_model_response(
             openai_response=upstream_response
         )
+
         if not hasattr(litellm_response, 'usage') or litellm_response.usage is None:
-            # Ensure usage is present for the streaming methods to access
-            prompt_tokens = litellm.token_counter(model=UPSTREAM_MODEL_NAME, messages=messages)
-            completion_tokens = litellm.token_counter(model=UPSTREAM_MODEL_NAME,
-                                                      text=litellm_response.choices[0].message.content or "")
+            prompt_tokens = 0
+            completion_tokens = 0
+            if messages:
+                try:  # Wrap token_counter in try-except as it can sometimes fail with custom/uncommon models
+                    prompt_tokens = litellm.token_counter(model=UPSTREAM_MODEL_NAME, messages=messages)
+                except:
+                    prompt_tokens = 0  # Fallback
+            if litellm_response.choices and litellm_response.choices[0].message and litellm_response.choices[
+                0].message.content:
+                try:
+                    completion_tokens = litellm.token_counter(model=UPSTREAM_MODEL_NAME,
+                                                              text=litellm_response.choices[0].message.content)
+                except:
+                    completion_tokens = 0  # Fallback
             litellm_response.usage = Usage(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                                            total_tokens=prompt_tokens + completion_tokens)
 
@@ -122,13 +131,11 @@ class MTLSOpenAILLM(CustomLLM):
 
     async def acompletion(self, *args, **kwargs) -> litellm.ModelResponse:
         messages = kwargs.get("messages")
-        # Make a copy of kwargs to modify, ensuring 'stream' is not passed to the non-streaming call
         local_kwargs = kwargs.copy()
-        local_kwargs.pop("stream", None)  # Explicitly remove stream for this non-streaming method
+        local_kwargs.pop("stream", None)
 
         async_openai_client = self._get_client(asynchronous=True)
         try:
-            # Use local_kwargs which doesn't have 'stream'
             upstream_response: ChatCompletion = await async_openai_client.chat.completions.create(
                 model=UPSTREAM_MODEL_NAME,
                 messages=messages,
@@ -146,18 +153,26 @@ class MTLSOpenAILLM(CustomLLM):
             openai_response=upstream_response
         )
         if not hasattr(litellm_response, 'usage') or litellm_response.usage is None:
-            # Ensure usage is present for the streaming methods to access
-            prompt_tokens = litellm.token_counter(model=UPSTREAM_MODEL_NAME, messages=messages)
-            completion_tokens = litellm.token_counter(model=UPSTREAM_MODEL_NAME,
-                                                      text=litellm_response.choices[0].message.content or "")
+            prompt_tokens = 0
+            completion_tokens = 0
+            if messages:
+                try:
+                    prompt_tokens = litellm.token_counter(model=UPSTREAM_MODEL_NAME, messages=messages)
+                except:
+                    prompt_tokens = 0
+            if litellm_response.choices and litellm_response.choices[0].message and litellm_response.choices[
+                0].message.content:
+                try:
+                    completion_tokens = litellm.token_counter(model=UPSTREAM_MODEL_NAME,
+                                                              text=litellm_response.choices[0].message.content)
+                except:
+                    completion_tokens = 0
             litellm_response.usage = Usage(prompt_tokens=prompt_tokens, completion_tokens=completion_tokens,
                                            total_tokens=prompt_tokens + completion_tokens)
 
         return litellm_response
 
     def streaming(self, *args, **kwargs) -> Iterator[GenericStreamingChunk]:
-        # This method is called when litellm.completion(..., stream=True) is used.
-        # It should call the non-streaming version and then adapt its output.
         model_response: ModelResponse = self.completion(*args, **kwargs)
 
         response_content = ""
@@ -169,7 +184,6 @@ class MTLSOpenAILLM(CustomLLM):
         _created = model_response.created or int(time.time())
         _system_fingerprint = getattr(model_response, 'system_fingerprint', None)
 
-        # Yield content chunk
         yield GenericStreamingChunk(
             id=_id,
             object="chat.completion.chunk",
@@ -182,8 +196,8 @@ class MTLSOpenAILLM(CustomLLM):
             usage=None,
             index=0
         )
-
-        # Yield finalization chunk
+        # add debugging
+        print(model_response)
         yield GenericStreamingChunk(
             id=_id,
             object="chat.completion.chunk",
@@ -193,12 +207,11 @@ class MTLSOpenAILLM(CustomLLM):
             text="",
             is_finished=True,
             finish_reason="stop",
-            usage=model_response.usage,
+            usage=dict(model_response.usage),
             index=0
         )
 
     async def astreaming(self, *args, **kwargs) -> AsyncIterator[GenericStreamingChunk]:
-        # This method is called when litellm.acompletion(..., stream=True) is used.
         model_response: ModelResponse = await self.acompletion(*args, **kwargs)
         response_content = ""
         if model_response.choices and model_response.choices[0].message and model_response.choices[0].message.content:
@@ -209,7 +222,6 @@ class MTLSOpenAILLM(CustomLLM):
         _created = model_response.created or int(time.time())
         _system_fingerprint = getattr(model_response, 'system_fingerprint', None)
 
-        # Yield content chunk
         yield GenericStreamingChunk(
             id=_id,
             object="chat.completion.chunk",
@@ -222,8 +234,8 @@ class MTLSOpenAILLM(CustomLLM):
             usage=None,
             index=0
         )
-
-        # Yield finalization chunk
+        #add debugging
+        print(model_response)
         yield GenericStreamingChunk(
             id=_id,
             object="chat.completion.chunk",
@@ -249,33 +261,33 @@ litellm.custom_provider_map = [
 if __name__ == "__main__":
     # litellm.set_verbose = True
 
-    print("Testing synchronous non-streaming:")
-    try:
-        resp_sync_non_stream = litellm.completion(
-            model="mtls_openai_llm/sync-non-stream",
-            messages=[{"role": "user", "content": "Hello from sync non-stream!"}],
-        )
-        print(f"Response: {resp_sync_non_stream.choices[0].message.content}")
-        print(f"Usage: {resp_sync_non_stream.usage}")
-    except Exception as e:
-        print(f"Error in sync non-streaming: {e}")
-        traceback.print_exc()
-    print("=" * 40)
-
-    print("Testing asynchronous non-streaming:")
-    try:
-        resp_async_non_stream = asyncio.run(
-            litellm.acompletion(
-                model="mtls_openai_llm/async-non-stream",
-                messages=[{"role": "user", "content": "Hello from async non-stream!"}],
-            )
-        )
-        print(f"Response: {resp_async_non_stream.choices[0].message.content}")
-        print(f"Usage: {resp_async_non_stream.usage}")
-    except Exception as e:
-        print(f"Error in async non-streaming: {e}")
-        traceback.print_exc()
-    print("=" * 40)
+    # print("Testing synchronous non-streaming:")
+    # try:
+    #     resp_sync_non_stream = litellm.completion(
+    #         model="mtls_openai_llm/sync-non-stream",
+    #         messages=[{"role": "user", "content": "Hello from sync non-stream!"}],
+    #     )
+    #     print(f"Response: {resp_sync_non_stream.choices[0].message.content}")
+    #     print(f"Usage: {resp_sync_non_stream.usage}")
+    # except Exception as e:
+    #     print(f"Error in sync non-streaming: {e}")
+    #     traceback.print_exc()
+    # print("=" * 40)
+    #
+    # print("Testing asynchronous non-streaming:")
+    # try:
+    #     resp_async_non_stream = asyncio.run(
+    #         litellm.acompletion(
+    #             model="mtls_openai_llm/async-non-stream",
+    #             messages=[{"role": "user", "content": "Hello from async non-stream!"}],
+    #         )
+    #     )
+    #     print(f"Response: {resp_async_non_stream.choices[0].message.content}")
+    #     print(f"Usage: {resp_async_non_stream.usage}")
+    # except Exception as e:
+    #     print(f"Error in async non-streaming: {e}")
+    #     traceback.print_exc()
+    # print("=" * 40)
 
     print("Testing synchronous streaming:")
     try:
@@ -287,15 +299,22 @@ if __name__ == "__main__":
         full_response_content_sync = ""
         usage_sync = None
         print("Iterating over sync stream:")
-        # The CustomStreamWrapper will convert GenericStreamingChunk to ModelResponseStream
-        # So, the consuming code should expect ModelResponseStream's structure.
         for chunk_num, chunk in enumerate(response_sync_stream):
-            content = chunk.choices[0].delta.content  # Correct way to access content
+            #debug
+            print(chunk)
+            print(dict(chunk))
+            content = None
+            # For ModelResponseStream, content is in choices[0].delta.content
+            if chunk.choices and chunk.choices[0].delta:
+                content = chunk.choices[0].delta.content
+
             finish_reason = chunk.choices[0].finish_reason
             print(f"  Sync Stream Chunk {chunk_num + 1}: finish_reason='{finish_reason}', content='{content or ''}'")
             if content:
                 full_response_content_sync += content
-            if chunk.usage:
+
+            # Usage is typically on the last chunk or when finish_reason is not None
+            if hasattr(chunk, 'usage') and chunk.usage is not None:
                 usage_sync = chunk.usage
         print(f"Full Sync Streamed Response: {full_response_content_sync}")
         if usage_sync:
@@ -308,33 +327,38 @@ if __name__ == "__main__":
     print("Testing asynchronous streaming:")
 
 
-    async def consume_async_stream():
-        try:
-            response_async_stream = await litellm.acompletion(
-                model="mtls_openai_llm/async-stream",
-                messages=[{"role": "user", "content": "Hello from async stream!"}],
-                stream=True,
-            )
-            full_response_content_async = ""
-            usage_async = None
-            print("Iterating over async stream:")
-            chunk_num = 0
-            async for chunk in response_async_stream:
-                chunk_num += 1
-                content = chunk.choices[0].delta.content  # Correct way to access content
-                finish_reason = chunk.choices[0].finish_reason
-                print(f"  Async Stream Chunk {chunk_num}: finish_reason='{finish_reason}', content='{content or ''}'")
-                if content:
-                    full_response_content_async += content
-                if chunk.usage:
-                    usage_async = chunk.usage
-            print(f"Full Async Streamed Response: {full_response_content_async}")
-            if usage_async:
-                print(f"Async Stream Usage: {usage_async}")
-        except Exception as e:
-            print(f"Error in async streaming: {e}")
-            traceback.print_exc()
-
-
-    asyncio.run(consume_async_stream())
+    # async def consume_async_stream():
+    #     try:
+    #         response_async_stream = await litellm.acompletion(
+    #             model="mtls_openai_llm/async-stream",
+    #             messages=[{"role": "user", "content": "Hello from async stream!"}],
+    #             stream=True,
+    #         )
+    #         full_response_content_async = ""
+    #         usage_async = None
+    #         print("Iterating over async stream:")
+    #         chunk_num = 0
+    #         async for chunk in response_async_stream:
+    #             chunk_num += 1
+    #             content = None
+    #             # For ModelResponseStream, content is in choices[0].delta.content
+    #             if chunk.choices and chunk.choices[0].delta:
+    #                 content = chunk.choices[0].delta.content
+    #
+    #             finish_reason = chunk.choices[0].finish_reason
+    #             print(f"  Async Stream Chunk {chunk_num}: finish_reason='{finish_reason}', content='{content or ''}'")
+    #             if content:
+    #                 full_response_content_async += content
+    #
+    #             if hasattr(chunk, 'usage') and chunk.usage is not None:
+    #                 usage_async = chunk.usage
+    #         print(f"Full Async Streamed Response: {full_response_content_async}")
+    #         if usage_async:
+    #             print(f"Async Stream Usage: {usage_async}")
+    #     except Exception as e:
+    #         print(f"Error in async streaming: {e}")
+    #         traceback.print_exc()
+    #
+    #
+    # asyncio.run(consume_async_stream())
     print("=" * 40)
